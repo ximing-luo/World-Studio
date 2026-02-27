@@ -1,4 +1,9 @@
-# 定义旋转数据集，模拟“世界模型”的下一帧预测
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+
+
+# 定义旋转数据集，模拟"世界模型"的下一帧预测
 class RotatedMNIST(Dataset):
     def __init__(self, mnist_dataset, angle=45):
         self.mnist_dataset = mnist_dataset
