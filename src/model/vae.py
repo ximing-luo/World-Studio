@@ -5,8 +5,9 @@ import torch.nn.functional as F
 
 # 定义 VAE 模型
 class VAE(nn.Module):
-    def __init__(self, input_dim=784, hidden_dim=300, latent_dim=15):
+    def __init__(self, input_dim=784, hidden_dim=400, latent_dim=20):
         super(VAE, self).__init__()
+        self.input_dim = input_dim
 
         # 编码器：将输入压缩到隐空间
         self.fc1 = nn.Linear(input_dim, hidden_dim)
@@ -32,6 +33,7 @@ class VAE(nn.Module):
         return torch.sigmoid(self.fc4(h3))
 
     def forward(self, x):
-        mu, logvar = self.encode(x.view(-1, 784))
+        # 自动展平输入
+        mu, logvar = self.encode(x.view(-1, self.input_dim))
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
