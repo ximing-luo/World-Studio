@@ -23,7 +23,10 @@ def visualize_reconstruction(model, device, test_loader, epoch):
             img_input = data[i].cpu().squeeze()
             if img_input.dim() == 3: # (C, H, W) -> (H, W, C) for imshow
                 img_input = img_input.permute(1, 2, 0)
-            plt.imshow(img_input, cmap='gray' if img_input.dim() == 2 else None)
+                # 如果是 float tensor (0-1)，直接显示；如果是 uint8 (0-255)，转换为 0-1
+                if img_input.dtype == torch.float32:
+                    img_input = torch.clamp(img_input, 0, 1)
+            plt.imshow(img_input.numpy(), cmap='gray' if img_input.dim() == 2 else None)
             plt.title("Input")
             plt.axis('off')
 
@@ -31,7 +34,9 @@ def visualize_reconstruction(model, device, test_loader, epoch):
             img_target = target[i].cpu().squeeze()
             if img_target.dim() == 3:
                 img_target = img_target.permute(1, 2, 0)
-            plt.imshow(img_target, cmap='gray' if img_target.dim() == 2 else None)
+                if img_target.dtype == torch.float32:
+                    img_target = torch.clamp(img_target, 0, 1)
+            plt.imshow(img_target.numpy(), cmap='gray' if img_target.dim() == 2 else None)
             plt.title("Target")
             plt.axis('off')
 
@@ -39,7 +44,9 @@ def visualize_reconstruction(model, device, test_loader, epoch):
             img_recon = recon[i].cpu().view(img_shape).squeeze()
             if img_recon.dim() == 3:
                 img_recon = img_recon.permute(1, 2, 0)
-            plt.imshow(img_recon, cmap='gray' if img_recon.dim() == 2 else None)
+                if img_recon.dtype == torch.float32:
+                    img_recon = torch.clamp(img_recon, 0, 1)
+            plt.imshow(img_recon.numpy(), cmap='gray' if img_recon.dim() == 2 else None)
             plt.title("Predict")
             plt.axis('off')
 

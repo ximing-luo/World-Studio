@@ -24,8 +24,8 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0):
         kld_loss += KLD.item()
         optimizer.step()
         
-        # 根据数据量调整打印频率：每 10 个 batch 或每 epoch 打印 4 次左右
-        log_interval = max(1, len(train_loader) // 4)
+        # 根据数据量调整打印频率：每 epoch 打印 4 次左右
+        log_interval = max(1, len(train_loader) // 10)
         if batch_idx % log_interval == 0:
             # 计算归一化指标：每个像素的 BCE 和每个隐层维度的 KLD
             pixels_per_sample = data[0].numel()

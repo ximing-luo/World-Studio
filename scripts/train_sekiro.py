@@ -27,11 +27,11 @@ def main():
     print(f"Using device: {device} | Task: Sekiro Reconstruction (ConvVAE)")
     
     # 超参数
-    batch_size = 64 # 卷积层显存占用较小，可以适当调大
+    batch_size = 96 # 卷积层显存占用较小，可以适当调大
     epochs = 30
     learning_rate = 1e-3
     beta = 1.0
-    latent_dim = 64
+    latent_dim = 196
     
     # 数据转换：仅保留基础转换，全分辨率彩色
     sekiro_transform = transforms.Compose([
@@ -53,7 +53,7 @@ def main():
     model = ConvVAE(latent_dim=latent_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     # 添加学习率调度器：3 轮 loss 不下降则降低学习率
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=3)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=3)
     
     loss_history, bce_history, kld_history = [], [], []
     
@@ -64,7 +64,7 @@ def main():
         kld_history.append(avg_kld)
         
         # 更新学习率
-        scheduler.step(avg_loss)
+        # scheduler.step(avg_loss)
         
         # 可视化
         visualize_reconstruction(model, device, test_loader, epoch)
