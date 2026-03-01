@@ -12,7 +12,8 @@ import numpy as np
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.model.dream.vq_vae import VQVAE
+from src.model.mnist.vq_vae import FCVQVAE, ConvVQVAE, ResNetVQVAE
+from src.datasets.mnist import MNIST_VQVAE_Dataset
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,13 +22,14 @@ def train():
     # 数据准备
     transform = transforms.ToTensor()
     # 使用标准 MNIST，VQ-VAE 主要任务是高质量重建/压缩
-    train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    train_dataset = MNIST_VQVAE_Dataset(mnist_train)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
 
-    # 模型初始化
-    # embedding_dim=32, num_embeddings=512 (codebook size)
-    model = VQVAE(in_channels=1, num_hiddens=64, num_residual_layers=2, 
-                  num_embeddings=512, embedding_dim=32).to(device)
+    # 模型初始化 - 支持 FC, Conv, ResNet 三种架构
+    # model = FCVQVAE(num_embeddings=512, embedding_dim=32).to(device)
+    # model = ResNetVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
+    model = ConvVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
@@ -69,6 +71,11 @@ def train():
         # 可视化
         visualize_reconstruction(model, train_loader, device, epoch)
 
+    # 保存模型
+    os.makedirs('outputs/models', exist_ok=True)
+    torch.save(model.state_dict(), 'outputs/models/mnist_vqvae.pth')
+    print(f"Model saved to 'outputs/models/mnist_vqvae.pth'")
+
 def visualize_reconstruction(model, loader, device, epoch, num_samples=8):
     model.eval()
     with torch.no_grad():
@@ -94,10 +101,10 @@ def visualize_reconstruction(model, loader, device, epoch, num_samples=8):
             if i == 0: ax.set_title("Reconstruction")
             
         plt.tight_layout()
-        os.makedirs('outputs/results/vqvae', exist_ok=True)
-        plt.savefig(f'outputs/results/vqvae/epoch_{epoch}.png')
+        os.makedirs('outputs/results/mnist/vqvae', exist_ok=True)
+        plt.savefig(f'outputs/results/mnist/vqvae/epoch_{epoch}.png')
         plt.close()
-        print(f"Saved visualization to outputs/results/vqvae/epoch_{epoch}.png")
+        print(f"Saved visualization to outputs/results/mnist/vqvae/epoch_{epoch}.png")
 
 if __name__ == "__main__":
     train()

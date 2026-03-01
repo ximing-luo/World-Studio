@@ -57,11 +57,11 @@ def visualize_reconstruction(model, device, test_loader, epoch):
 
 
 # 绘制训练曲线
-def plot_loss(loss_history, bce_history, kld_history):
+def plot_loss(loss_history, recon_history, kld_history):
     plt.figure(figsize=(10, 5))
     # 只画归一化后的指标，因为 Total Loss 量级太大，画在一起会看不清
-    plt.plot(bce_history, label='BCE/px (Reconstruction)')
-    plt.plot(kld_history, label='KLD/dim (Regularization)')
+    plt.plot(recon_history, label='Recon/px')
+    plt.plot(kld_history, label='KLD/dim')
     plt.xlabel('Epoch')
     plt.ylabel('Normalized Loss')
     plt.title('VAE Training Loss (Normalized Metrics)')

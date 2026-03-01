@@ -12,9 +12,8 @@ import numpy as np
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.model.dream.vae import res20, VAE
-from src.model.dream.rssm import RSSM
-from src.datasets.dataset import SequentialRotatedMNIST
+from src.model.mnist.rssm import FCRSSM, ConvRSSM, ResNetRSSM
+from src.datasets.mnist import MNIST_RSSM_Dataset
 
 def kl_divergence(mu1, logvar1, mu2, logvar2):
     """计算两个高斯分布之间的 KL 散度: KL(N(mu1, sigma1) || N(mu2, sigma2))"""
@@ -31,14 +30,13 @@ def train():
     # 数据准备
     mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transforms.ToTensor())
     # 序列长度为 8，每步旋转 15 度
-    train_dataset = SequentialRotatedMNIST(mnist_train, seq_len=8, angle=15)
+    train_dataset = MNIST_RSSM_Dataset(mnist_train, seq_len=8, angle=15)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
 
-    # 模型初始化
-    backbone = VAE().to(device)
-    # MNIST 28x28, latent_dim=20 (from res20 default)
-    # RSSM: deterministic_dim=256, stochastic_dim=32, action_dim=1 (旋转角度)
-    model = RSSM(backbone, deterministic_dim=256, stochastic_dim=32, action_dim=1).to(device)
+    # 模型初始化 - 支持 FC, Conv, ResNet 三种架构
+    # model = FCRSSM(action_dim=1).to(device)
+    # model = ResNetRSSM(action_dim=1).to(device)
+    model = ConvRSSM(action_dim=1).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
@@ -85,8 +83,8 @@ def train():
                 # 2. 想象步 (Prior) - 用于计算 KL 散度，让先验向后验靠拢
                 _, (prior_mu, prior_logvar) = model.imagine(state, current_action)
                 
-                # 3. 解码 (从后验状态重建当前帧)
-                recon_obs = model.decode(post_state)
+                # 3. 解码 (从后验状态还原为图像)
+                recon_obs = model.decode_state(post_state[0], post_state[1])
                 
                 # 计算损失
                 recon_loss = F.mse_loss(recon_obs, obs, reduction='sum') / B
@@ -117,6 +115,11 @@ def train():
         # 每个 epoch 结束后进行一次可视化
         visualize_dream(model, train_loader, device, epoch)
 
+    # 保存模型
+    os.makedirs('outputs/models', exist_ok=True)
+    torch.save(model.state_dict(), 'outputs/models/mnist_rssm.pth')
+    print(f"Model saved to 'outputs/models/mnist_rssm.pth'")
+
 def visualize_dream(model, loader, device, epoch, num_samples=5):
     model.eval()
     with torch.no_grad():
@@ -146,7 +149,7 @@ def visualize_dream(model, loader, device, epoch, num_samples=5):
                 current_action = actions[t-1]
                 
             post_state, _ = model.observe(obs, state, current_action)
-            recon = model.decode(post_state)
+            recon = model.decode_state(post_state[0], post_state[1])
             recon_frames.append(recon.cpu())
             state = post_state
             
@@ -156,7 +159,7 @@ def visualize_dream(model, loader, device, epoch, num_samples=5):
             current_action = actions[t-1]
             
             prior_state, _ = model.imagine(state, current_action)
-            recon = model.decode(prior_state)
+            recon = model.decode_state(prior_state[0], prior_state[1])
             recon_frames.append(recon.cpu())
             state = prior_state
             
@@ -176,10 +179,10 @@ def visualize_dream(model, loader, device, epoch, num_samples=5):
                     ax.set_title("Imagined" if i==0 else "")
         
         plt.tight_layout()
-        os.makedirs('outputs/results/rssm', exist_ok=True)
-        plt.savefig(f'outputs/results/rssm/dream_epoch_{epoch}.png')
+        os.makedirs('outputs/results/mnist/rssm', exist_ok=True)
+        plt.savefig(f'outputs/results/mnist/rssm/dream_epoch_{epoch}.png')
         plt.close()
-        print(f"Saved visualization to outputs/results/rssm/dream_epoch_{epoch}.png")
+        print(f"Saved visualization to outputs/results/mnist/rssm/dream_epoch_{epoch}.png")
 
 if __name__ == "__main__":
     train()

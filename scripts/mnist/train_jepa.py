@@ -13,8 +13,8 @@ import time
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.model.dream.jepa import MNIST_JEPA
-from src.datasets.dataset import RotatedMNIST
+from src.model.mnist.jepa import FCJEPA, ConvJEPA, ResNetJEPA
+from src.datasets.mnist import MNIST_JEPA_Dataset
 
 def validate_semantic_classification(model, device, train_loader_probe, test_loader_probe, num_epochs=1):
     """
@@ -160,19 +160,21 @@ def train():
     mnist_test = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
     
     # 训练集：随机旋转
-    train_dataset = RotatedMNIST(mnist_train, random_angle=True)
+    train_dataset = MNIST_JEPA_Dataset(mnist_train)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
     
     # 测试集：用于验证任务
-    test_dataset = RotatedMNIST(mnist_test, random_angle=True)
+    test_dataset = MNIST_JEPA_Dataset(mnist_test)
     test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
     
     # 线性探测专用 Loader (提前创建，避免在循环中重复创建)
     train_loader_probe = DataLoader(mnist_train, batch_size=256, shuffle=True)
     test_loader_probe = DataLoader(mnist_test, batch_size=256, shuffle=False)
 
-    # 模型初始化
-    model = MNIST_JEPA(in_channels=1, latent_dim=128).to(device)
+    # 模型初始化 - 支持 FC, Conv, ResNet 三种架构
+    # model = FCJEPA(latent_dim=128).to(device)
+    # model = ResNetJEPA(in_channels=1, latent_dim=128).to(device)
+    model = ConvJEPA(in_channels=1, latent_dim=128).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
     epochs = 10 # 增加到 10 轮，让模型有时间逃离恒等映射
@@ -238,13 +240,18 @@ def train():
             if high_acc_mode:
                 current_probe_acc = validate_semantic_classification(model, device, train_loader_probe, test_loader_probe)
                 print(f"Epoch {epoch} Final Semantic Acc: {current_probe_acc:.1f}%")
+
+        # 保存模型
+        os.makedirs('outputs/models', exist_ok=True)
+        torch.save(model.state_dict(), 'outputs/models/mnist_jepa.pth')
+        print(f"Model saved to 'outputs/models/mnist_jepa.pth'")
             
     except KeyboardInterrupt:
         print("Training interrupted. Saving plots...")
     
     # 可视化结果
     save_plots(history)
-    print(f"Training finished in {time.time() - start_time:.1f}s. Plots saved as 'jepa_results.png'")
+    print(f"Training finished in {time.time() - start_time:.1f}s. Plots saved to 'outputs/results/mnist/jepa/jepa_results.png'")
 
 def save_plots(history):
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
@@ -274,7 +281,8 @@ def save_plots(history):
     axes[1, 1].grid(True)
     
     plt.tight_layout()
-    plt.savefig('outputs/results/rssm_mnist/jepa_results.png')
+    os.makedirs('outputs/results/mnist/jepa', exist_ok=True)
+    plt.savefig('outputs/results/mnist/jepa/jepa_results.png')
     plt.close()
 
 if __name__ == "__main__":
