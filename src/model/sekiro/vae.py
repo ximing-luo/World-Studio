@@ -26,19 +26,19 @@ class BaseSekiroVAE(nn.Module):
         return self.decode(z), mu, logvar
 
 class ConvSekiroVAE(BaseSekiroVAE):
-    """卷积版 Sekiro VAE (适用于 136x240)"""
+    """卷积版 Sekiro VAE (适用于 128x240)"""
     def __init__(self, latent_dim=256):
         super(ConvSekiroVAE, self).__init__(latent_dim)
         
-        # Encoder: (3, 136, 240) -> (512, 4, 7)
+        # Encoder: (3, 128, 240) -> (512, 4, 7)
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(3, 32, 4, stride=2, padding=1),   # 68x120
+            nn.Conv2d(3, 32, 4, stride=2, padding=1),   # 64x120
             nn.BatchNorm2d(32),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1),  # 34x60
+            nn.Conv2d(32, 64, 4, stride=2, padding=1),  # 32x60
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 17x30
+            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 16x30
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(128, 256, 4, stride=2, padding=1), # 8x15
@@ -65,16 +65,16 @@ class ConvSekiroVAE(BaseSekiroVAE):
             nn.ConvTranspose2d(512, 256, 4, stride=2, padding=1, output_padding=(0, 1)), # 8x15
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1, output_padding=(1, 0)), # 17x30
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1), # 16x30
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1), # 34x60
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1), # 32x60
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), # 68x120
+            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), # 64x120
             nn.BatchNorm2d(32),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.ConvTranspose2d(32, 3, 4, stride=2, padding=1), # 136x240
+            nn.ConvTranspose2d(32, 3, 4, stride=2, padding=1), # 128x240
             nn.Sigmoid()
         )
 
@@ -96,16 +96,16 @@ class ResNetSekiroVAE(BaseSekiroVAE):
         
         # Encoder
         self.stem = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1), # 68x120
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1), # 64x120
             nn.GroupNorm(8, 32),
             nn.SiLU(inplace=True)
         )
-        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=2)  # 34x60
-        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2) # 17x30
-        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2) # 9x15
-        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2) # 5x8
+        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=2)  # 32x60
+        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2) # 16x30
+        self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2) # 8x15
+        self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2) # 4x8
         
-        self.flatten_dim = 512 * self.block_expansion * 5 * 8
+        self.flatten_dim = 512 * self.block_expansion * 4 * 8
         self.fc_mu = nn.Linear(self.flatten_dim, latent_dim)
         self.fc_logvar = nn.Linear(self.flatten_dim, latent_dim)
         
@@ -114,21 +114,21 @@ class ResNetSekiroVAE(BaseSekiroVAE):
         self.in_channels = 512 * self.block_expansion
         
         self.layer5 = self._make_layer(block, 512, num_blocks[3], stride=1)
-        self.upsample1 = nn.ConvTranspose2d(512 * self.block_expansion, 256, kernel_size=3, stride=2, padding=1, output_padding=0) # 9x15
+        self.upsample1 = nn.ConvTranspose2d(512 * self.block_expansion, 256, kernel_size=3, stride=2, padding=1, output_padding=(1, 0)) # 8x15
         
         self.in_channels = 256 * self.block_expansion
         self.layer6 = self._make_layer(block, 256, num_blocks[2], stride=1)
-        self.upsample2 = nn.ConvTranspose2d(256 * self.block_expansion, 128, kernel_size=3, stride=2, padding=1, output_padding=(0, 1)) # 17x30
+        self.upsample2 = nn.ConvTranspose2d(256 * self.block_expansion, 128, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 16x30
         
         self.in_channels = 128 * self.block_expansion
         self.layer7 = self._make_layer(block, 128, num_blocks[1], stride=1)
-        self.upsample3 = nn.ConvTranspose2d(128 * self.block_expansion, 64, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 34x60
+        self.upsample3 = nn.ConvTranspose2d(128 * self.block_expansion, 64, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 32x60
         
         self.in_channels = 64 * self.block_expansion
         self.layer8 = self._make_layer(block, 64, num_blocks[0], stride=1)
-        self.upsample4 = nn.ConvTranspose2d(64 * self.block_expansion, 32, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 68x120
+        self.upsample4 = nn.ConvTranspose2d(64 * self.block_expansion, 32, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 64x120
         
-        self.upsample5 = nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 136x240
+        self.upsample5 = nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 128x240
         self.final_conv = nn.Sequential(
             nn.Conv2d(16, 3, kernel_size=3, padding=1),
             nn.Sigmoid()
@@ -152,7 +152,7 @@ class ResNetSekiroVAE(BaseSekiroVAE):
         return self.fc_mu(h), self.fc_logvar(h)
 
     def decode(self, z):
-        h = self.fc_z(z).view(-1, 512 * self.block_expansion, 5, 8)
+        h = self.fc_z(z).view(-1, 512 * self.block_expansion, 4, 8)
         h = self.layer5(h)
         h = self.upsample1(h)
         h = self.layer6(h)

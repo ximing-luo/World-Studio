@@ -8,16 +8,78 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import time
+from torch.utils.tensorboard import SummaryWriter
 
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from src.model.sekiro.jepa import ConvSekiroJEPA, ResNetSekiroJEPA
 from src.datasets.sekiro import Sekiro_JEPA_Dataset
+from src.train.train_utils import get_log_dir
 
-def validate_action_regression(model, device, test_loader):
+def train(epoch, model, train_loader, optimizer, device, writer=None):
+    model.train()
+    total_jepa_loss = 0
+    start_time = time.time()
+    
+    for batch_idx, (img, next_img, action) in enumerate(train_loader):
+        # 将 uint8 数据搬运到 GPU 后再进行浮点转换和归一化 (极致性能)
+        img = img.to(device).float() / 255.0
+        next_img = next_img.to(device).float() / 255.0
+        action = action.to(device)
+        B = img.size(0)
+        
+        # --- JEPA 自监督训练 ---
+        optimizer.zero_grad()
+        _, _, jepa_loss = model(img, next_img, action)
+        jepa_loss.backward()
+        optimizer.step()
+        model.update_target(momentum=0.99)
+        
+        total_jepa_loss += jepa_loss.item()
+        
+        if batch_idx % 10 == 0:
+            elapsed = time.time() - start_time
+            print(f"[{elapsed:.2f}s] Epoch {epoch} [{batch_idx * B}/{len(train_loader.dataset)}] Loss: {jepa_loss.item():.4f}")
+            if writer is not None:
+                step = (epoch - 1) * len(train_loader) + batch_idx
+                writer.add_scalar('train/loss', jepa_loss.item(), step)
+            
+    avg_loss = total_jepa_loss / len(train_loader)
+    return avg_loss
+
+def visualize(model, loader, device, epoch, history=None, writer=None):
     """
-    验证任务：动作回归 (Action Regression)
+    可视化训练曲线 (JEPA 没有直接的像素重建)
+    """
+    if history is None:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # 1. JEPA Loss
+    if 'jepa_loss' in history and len(history['jepa_loss']) > 0:
+        axes[0].plot(range(1, len(history['jepa_loss']) + 1), history['jepa_loss'], color='blue', label='JEPA Loss')
+        axes[0].set_title('Training Loss')
+        axes[0].grid(True)
+        axes[0].set_xlabel('Epoch')
+    
+    # 2. Feature Error
+    if 'feature_error' in history and len(history['feature_error']) > 0:
+        axes[1].plot(range(1, len(history['feature_error']) + 1), history['feature_error'], color='red', label='L2 Feature Error')
+        axes[1].set_title('Next-Frame Feature Prediction Error')
+        axes[1].grid(True)
+        axes[1].set_xlabel('Epoch')
+    
+    plt.tight_layout()
+    os.makedirs('outputs/results/sekiro/jepa', exist_ok=True)
+    plt.savefig('outputs/results/sekiro/jepa/jepa_results.png')
+    plt.close()
+    print(f"Saved visualization to outputs/results/sekiro/jepa/jepa_results.png")
+
+def eval_task(model, loader, device, writer=None, epoch=None):
+    """
+    验证任务：动作回归/特征预测误差
     由于 Sekiro 的动作空间 [1, 2] 是连续/多维的，这里简单计算特征预测的误差。
     """
     model.eval()
@@ -25,9 +87,12 @@ def validate_action_regression(model, device, test_loader):
     count = 0
     
     with torch.no_grad():
-        for i, (img, next_img, action) in enumerate(test_loader):
-            if i > 10: break
-            img, next_img, action = img.to(device), next_img.to(device), action.to(device)
+        for i, (img, next_img, action) in enumerate(loader):
+            if i > 10: break # 仅验证部分 batch 以节省时间
+            # 将 uint8 数据搬运到 GPU 后再进行浮点转换和归一化 (极致性能)
+            img = img.to(device).float() / 255.0
+            next_img = next_img.to(device).float() / 255.0
+            action = action.to(device)
             
             z_context = model.context_encoder(img)
             z_target = model.target_encoder(next_img)
@@ -40,23 +105,41 @@ def validate_action_regression(model, device, test_loader):
             total_error += error.item()
             count += 1
                 
-    return total_error / count if count > 0 else 0
+    avg_error = total_error / count if count > 0 else 0
+    
+    if writer is not None and epoch is not None:
+        writer.add_scalar('val/feature_error', avg_error, epoch)
+        
+    return avg_error
 
-def train():
+def main():
+    # Hyperparameters
+    batch_size = 32
+    learning_rate = 1e-4
+    epochs = 10
+    latent_dim = 256
+    prediction_offset = 10 # 预测未来第几帧
+    log_dir = get_log_dir('logs/sekiro/jepa')
+    
+    # DataLoader num_workers: Windows 下开启多进程会导致内存占用飙升
+    num_workers = 2 
+    
+    # TensorBoard
+    writer = SummaryWriter(log_dir)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} | Task: Sekiro JEPA World Model")
 
     # 数据准备
-    dataset = Sekiro_JEPA_Dataset(data_dir='data/demos')
-    train_loader = DataLoader(dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    dataset = Sekiro_JEPA_Dataset(data_dir='data/Sekiro/recordings', frame_skip=prediction_offset)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     # 模型初始化 - 支持 Conv, ResNet 架构
-    # model = ResNetSekiroJEPA(in_channels=3, latent_dim=256, action_dim=15).to(device)
-    model = ConvSekiroJEPA(in_channels=3, latent_dim=256, action_dim=15).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    # model = ResNetSekiroJEPA(in_channels=3, latent_dim=latent_dim, action_dim=15).to(device)
+    model = ConvSekiroJEPA(in_channels=3, latent_dim=latent_dim, action_dim=15).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
-    epochs = 10
     history = {
         'jepa_loss': [],
         'feature_error': []
@@ -65,57 +148,23 @@ def train():
     start_time = time.time()
     
     for epoch in range(1, epochs + 1):
-        model.train()
-        total_jepa_loss = 0
+        train_loss = train(epoch, model, train_loader, optimizer, device, writer)
+        feat_error = eval_task(model, test_loader, device, writer, epoch)
         
-        for batch_idx, (img, next_img, action) in enumerate(train_loader):
-            img, next_img, action = img.to(device), next_img.to(device), action.to(device)
-            
-            # --- JEPA 自监督训练 ---
-            optimizer.zero_grad()
-            _, _, jepa_loss = model(img, next_img, action)
-            jepa_loss.backward()
-            optimizer.step()
-            model.update_target(momentum=0.99)
-            
-            total_jepa_loss += jepa_loss.item()
-            
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch} [{batch_idx}/{len(train_loader)}] Loss: {jepa_loss.item():.4f}")
-
-        # 验证
-        feat_error = validate_action_regression(model, device, test_loader)
-        history['jepa_loss'].append(total_jepa_loss / len(train_loader))
+        history['jepa_loss'].append(train_loss)
         history['feature_error'].append(feat_error)
         
-        print(f"====> Epoch: {epoch} Avg JEPA Loss: {history['jepa_loss'][-1]:.4f} | Feature Error: {feat_error:.4f}")
+        print(f"====> Epoch: {epoch} Avg JEPA Loss: {train_loss:.4f} | Feature Error: {feat_error:.4f}")
+        
+        visualize(model, train_loader, device, epoch, history=history, writer=writer)
 
     # 保存模型
     os.makedirs('outputs/models', exist_ok=True)
     torch.save(model.state_dict(), 'outputs/models/sekiro_jepa.pth')
     print(f"Model saved to 'outputs/models/sekiro_jepa.pth'")
-
-    # 可视化结果
-    save_plots(history)
-    print(f"Training finished in {time.time() - start_time:.1f}s. Plots saved to 'outputs/results/sekiro/jepa/jepa_results.png'")
-
-def save_plots(history):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    print(f"Training finished in {time.time() - start_time:.1f}s.")
     
-    # 1. JEPA Loss
-    axes[0].plot(history['jepa_loss'], color='blue', label='JEPA Loss')
-    axes[0].set_title('Training Loss')
-    axes[0].grid(True)
-    
-    # 2. Feature Error
-    axes[1].plot(history['feature_error'], color='red', label='L2 Feature Error')
-    axes[1].set_title('Next-Frame Feature Prediction Error')
-    axes[1].grid(True)
-    
-    plt.tight_layout()
-    os.makedirs('outputs/results/sekiro/jepa', exist_ok=True)
-    plt.savefig('outputs/results/sekiro/jepa/jepa_results.png')
-    plt.close()
+    writer.close()
 
 if __name__ == "__main__":
-    train()
+    main()

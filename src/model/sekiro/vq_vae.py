@@ -23,11 +23,11 @@ class BaseSekiroVQVAE(nn.Module):
         return x_recon, vq_loss
 
 class ConvSekiroVQVAE(BaseSekiroVQVAE):
-    """卷积版 Sekiro VQ-VAE"""
+    """卷积版 Sekiro VQ-VAE (适用于 128x240)"""
     def __init__(self, in_channels=3, num_hiddens=128, num_embeddings=512, embedding_dim=64):
         super(ConvSekiroVQVAE, self).__init__(num_embeddings, embedding_dim)
         
-        # Encoder: 136x240 -> 68x120 -> 34x60 -> 17x30
+        # Encoder: 128x240 -> 64x120 -> 32x60 -> 16x30
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(in_channels, num_hiddens//2, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
@@ -36,7 +36,7 @@ class ConvSekiroVQVAE(BaseSekiroVQVAE):
             nn.Conv2d(num_hiddens, embedding_dim, kernel_size=4, stride=2, padding=1)
         )
         
-        # Decoder
+        # Decoder: 16x30 -> 32x60 -> 64x120 -> 128x240
         self.decoder_conv = nn.Sequential(
             nn.ConvTranspose2d(embedding_dim, num_hiddens, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
@@ -53,29 +53,29 @@ class ConvSekiroVQVAE(BaseSekiroVQVAE):
         return self.decoder_conv(z)
 
 class ResNetSekiroVQVAE(BaseSekiroVQVAE):
-    """残差版 Sekiro VQ-VAE"""
+    """残差版 Sekiro VQ-VAE (适用于 128x240)"""
     def __init__(self, in_channels=3, num_hiddens=128, num_embeddings=512, embedding_dim=64, block=BasicBlock, num_blocks=[2, 2]):
         super(ResNetSekiroVQVAE, self).__init__(num_embeddings, embedding_dim)
         self.in_channels = num_hiddens
         self.block_expansion = block.expansion
 
-        # Encoder
+        # Encoder: 128x240 -> 64x120 -> 32x60
         self.encoder_conv1 = nn.Sequential(
             nn.Conv2d(in_channels, num_hiddens, kernel_size=3, padding=1, bias=False),
             nn.GroupNorm(8, num_hiddens),
             nn.SiLU(inplace=True)
         )
-        self.layer1 = self._make_layer(block, num_hiddens, num_blocks[0], stride=2)  # 68x120
-        self.layer2 = self._make_layer(block, embedding_dim // self.block_expansion, num_blocks[1], stride=2) # 34x60
+        self.layer1 = self._make_layer(block, num_hiddens, num_blocks[0], stride=2)  # 64x120
+        self.layer2 = self._make_layer(block, embedding_dim // self.block_expansion, num_blocks[1], stride=2) # 32x60
         
-        # Decoder
+        # Decoder: 32x60 -> 64x120 -> 128x240
         self.in_channels = embedding_dim
         self.layer3 = self._make_layer(block, embedding_dim // self.block_expansion, num_blocks[1], stride=1)
-        self.upsample1 = nn.ConvTranspose2d(embedding_dim, num_hiddens, kernel_size=3, stride=2, padding=1, output_padding=1) # 68x120
+        self.upsample1 = nn.ConvTranspose2d(embedding_dim, num_hiddens, kernel_size=3, stride=2, padding=1, output_padding=1) # 64x120
         
         self.in_channels = num_hiddens
         self.layer4 = self._make_layer(block, num_hiddens, num_blocks[0], stride=1)
-        self.upsample2 = nn.ConvTranspose2d(num_hiddens, num_hiddens // 2, kernel_size=3, stride=2, padding=1, output_padding=1) # 136x240
+        self.upsample2 = nn.ConvTranspose2d(num_hiddens, num_hiddens // 2, kernel_size=3, stride=2, padding=1, output_padding=1) # 128x240
 
         self.final_conv = nn.Sequential(
             nn.Conv2d(num_hiddens // 2, in_channels, kernel_size=3, padding=1),

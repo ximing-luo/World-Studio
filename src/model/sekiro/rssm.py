@@ -81,39 +81,39 @@ class BaseSekiroRSSM(nn.Module):
         return h, s
 
 class ConvSekiroRSSM(BaseSekiroRSSM):
-    """卷积版 Sekiro RSSM"""
+    """卷积版 Sekiro RSSM (适用于 128x240)"""
     def __init__(self, in_channels=3, deterministic_dim=512, stochastic_dim=64, action_dim=2):
         super(ConvSekiroRSSM, self).__init__(deterministic_dim, stochastic_dim, action_dim)
         
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 4, stride=2, padding=1), # 68x120
+            nn.Conv2d(in_channels, 32, 4, stride=2, padding=1), # 64x120
             nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1), # 34x60
+            nn.Conv2d(32, 64, 4, stride=2, padding=1), # 32x60
             nn.ReLU(),
-            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 17x30
+            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 16x30
             nn.ReLU(),
-            # 1x1 卷积压缩冗余通道，保留 17x30 空间信息
+            # 1x1 卷积压缩冗余通道，保留 16x30 空间信息
             nn.Conv2d(128, 32, 1),
             nn.ReLU(),
             nn.Conv2d(32, 16, 1),
             nn.ReLU(),
             nn.Flatten()
         )
-        self.post_net = self.get_post_net(16 * 17 * 30)
+        self.post_net = self.get_post_net(16 * 16 * 30)
         
         self.decoder_conv = nn.Sequential(
-            nn.Linear(deterministic_dim + stochastic_dim, 16 * 17 * 30),
-            nn.Unflatten(1, (16, 17, 30)),
+            nn.Linear(deterministic_dim + stochastic_dim, 16 * 16 * 30),
+            nn.Unflatten(1, (16, 16, 30)),
             nn.ConvTranspose2d(16, 32, 1), 
             nn.ReLU(),
             nn.ConvTranspose2d(32, 128, 1),
             nn.ReLU(),
-            # 从 17x30 开始恢复空间分辨率
-            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1), # 34x60
+            # 从 16x30 开始恢复空间分辨率
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1), # 32x60
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), # 68x120
+            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), # 64x120
             nn.ReLU(),
-            nn.ConvTranspose2d(32, in_channels, 4, stride=2, padding=1), # 136x240
+            nn.ConvTranspose2d(32, in_channels, 4, stride=2, padding=1), # 128x240
             nn.Sigmoid()
         )
 
@@ -124,33 +124,33 @@ class ConvSekiroRSSM(BaseSekiroRSSM):
         return self.decoder_conv(torch.cat([h, s], dim=-1))
 
 class ResNetSekiroRSSM(BaseSekiroRSSM):
-    """残差版 Sekiro RSSM"""
+    """残差版 Sekiro RSSM (适用于 128x240)"""
     def __init__(self, in_channels=3, num_hiddens=64, deterministic_dim=512, stochastic_dim=64, action_dim=2, block=BasicBlock, num_blocks=[2, 2]):
         super(ResNetSekiroRSSM, self).__init__(deterministic_dim, stochastic_dim, action_dim)
         self.num_hiddens = num_hiddens
         self.in_channels = num_hiddens
         self.block_expansion = block.expansion
 
-        # Encoder
+        # Encoder: 128x240 -> 64x120 -> 32x60
         self.encoder_conv1 = nn.Sequential(
             nn.Conv2d(in_channels, num_hiddens, kernel_size=3, padding=1, bias=False),
             nn.GroupNorm(8, num_hiddens),
             nn.SiLU(inplace=True)
         )
-        self.layer1 = self._make_layer(block, num_hiddens, num_blocks[0], stride=2)  # 68x120
-        self.layer2 = self._make_layer(block, num_hiddens * 2, num_blocks[1], stride=2) # 34x60
+        self.layer1 = self._make_layer(block, num_hiddens, num_blocks[0], stride=2)  # 64x120
+        self.layer2 = self._make_layer(block, num_hiddens * 2, num_blocks[1], stride=2) # 32x60
         
-        self.post_net = self.get_post_net(num_hiddens * 2 * self.block_expansion * 34 * 60)
+        self.post_net = self.get_post_net(num_hiddens * 2 * self.block_expansion * 32 * 60)
 
-        # Decoder
-        self.fc_z = nn.Linear(deterministic_dim + stochastic_dim, num_hiddens * 2 * self.block_expansion * 34 * 60)
+        # Decoder: 32x60 -> 64x120 -> 128x240
+        self.fc_z = nn.Linear(deterministic_dim + stochastic_dim, num_hiddens * 2 * self.block_expansion * 32 * 60)
         self.in_channels = num_hiddens * 2 * self.block_expansion
         self.layer3 = self._make_layer(block, num_hiddens * 2, num_blocks[1], stride=1)
-        self.upsample1 = nn.ConvTranspose2d(num_hiddens * 2 * self.block_expansion, num_hiddens, kernel_size=3, stride=2, padding=1, output_padding=1) # 68x120
+        self.upsample1 = nn.ConvTranspose2d(num_hiddens * 2 * self.block_expansion, num_hiddens, kernel_size=3, stride=2, padding=1, output_padding=1) # 64x120
         
         self.in_channels = num_hiddens
         self.layer4 = self._make_layer(block, num_hiddens, num_blocks[0], stride=1)
-        self.upsample2 = nn.ConvTranspose2d(num_hiddens, num_hiddens // 2, kernel_size=3, stride=2, padding=1, output_padding=1) # 136x240
+        self.upsample2 = nn.ConvTranspose2d(num_hiddens, num_hiddens // 2, kernel_size=3, stride=2, padding=1, output_padding=1) # 128x240
 
         self.final_conv = nn.Sequential(
             nn.Conv2d(num_hiddens // 2, in_channels, kernel_size=3, padding=1),
@@ -173,7 +173,7 @@ class ResNetSekiroRSSM(BaseSekiroRSSM):
 
     def decode(self, h, s):
         z = torch.cat([h, s], dim=-1)
-        h = self.fc_z(z).view(-1, self.num_hiddens * 2 * self.block_expansion, 34, 60)
+        h = self.fc_z(z).view(-1, self.num_hiddens * 2 * self.block_expansion, 32, 60)
         h = self.layer3(h)
         h = self.upsample1(h)
         h = self.layer4(h)
