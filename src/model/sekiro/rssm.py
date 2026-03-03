@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.model.components.resnet import BasicBlock
+from src.model.components.resnet import ResBlock
+from src.model.components.attention import SEBlock, Focus, UnFocus
 
 class BaseSekiroRSSM(nn.Module):
     """Sekiro RSSM 基类"""
@@ -124,58 +125,57 @@ class ConvSekiroRSSM(BaseSekiroRSSM):
         return self.decoder_conv(torch.cat([h, s], dim=-1))
 
 class ResNetSekiroRSSM(BaseSekiroRSSM):
-    """残差版 Sekiro RSSM (适用于 128x240)"""
-    def __init__(self, in_channels=3, num_hiddens=64, deterministic_dim=512, stochastic_dim=64, action_dim=2, block=BasicBlock, num_blocks=[2, 2]):
+    """残差版 Sekiro RSSM (适用于 128x240) - 深度对称架构"""
+    def __init__(self, in_channels=3, num_hiddens=64, deterministic_dim=512, stochastic_dim=64, action_dim=13):
         super(ResNetSekiroRSSM, self).__init__(deterministic_dim, stochastic_dim, action_dim)
         self.num_hiddens = num_hiddens
-        self.in_channels = num_hiddens
-        self.block_expansion = block.expansion
 
-        # Encoder: 128x240 -> 64x120 -> 32x60
-        self.encoder_conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, num_hiddens, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(8, num_hiddens),
-            nn.SiLU(inplace=True)
+        # Encoder Pipeline: 128x240 -> 8x15 -> Flattened Feature
+        self.encoder_conv = nn.Sequential(
+            # 直接四倍下采样，保留 128x240 空间信息，优化计算
+            Focus(in_channels, num_hiddens, block_size=4),
+            self._make_layer(ResBlock, num_hiddens, num_hiddens, num_blocks=4, stride=1),
+            self._make_layer(ResBlock, num_hiddens, num_hiddens * 2, num_blocks=6, stride=2),
+            self._make_layer(ResBlock, num_hiddens * 2, num_hiddens * 4, num_blocks=4, stride=2),
+            # 点卷积压缩通道，保留 8x15 空间信息
+            nn.Sequential(
+                nn.Conv2d(num_hiddens * 4, 64, 1, bias=False),
+                nn.GroupNorm(8, 64),
+                nn.SiLU(inplace=True)
+            ),
+            nn.Flatten()
         )
-        self.layer1 = self._make_layer(block, num_hiddens, num_blocks[0], stride=2)  # 64x120
-        self.layer2 = self._make_layer(block, num_hiddens * 2, num_blocks[1], stride=2) # 32x60
         
-        self.post_net = self.get_post_net(num_hiddens * 2 * self.block_expansion * 32 * 60)
+        self.feat_dim = 64 * 8 * 15
+        self.post_net = self.get_post_net(self.feat_dim)
 
-        # Decoder: 32x60 -> 64x120 -> 128x240
-        self.fc_z = nn.Linear(deterministic_dim + stochastic_dim, num_hiddens * 2 * self.block_expansion * 32 * 60)
-        self.in_channels = num_hiddens * 2 * self.block_expansion
-        self.layer3 = self._make_layer(block, num_hiddens * 2, num_blocks[1], stride=1)
-        self.upsample1 = nn.ConvTranspose2d(num_hiddens * 2 * self.block_expansion, num_hiddens, kernel_size=3, stride=2, padding=1, output_padding=1) # 64x120
-        
-        self.in_channels = num_hiddens
-        self.layer4 = self._make_layer(block, num_hiddens, num_blocks[0], stride=1)
-        self.upsample2 = nn.ConvTranspose2d(num_hiddens, num_hiddens // 2, kernel_size=3, stride=2, padding=1, output_padding=1) # 128x240
-
-        self.final_conv = nn.Sequential(
-            nn.Conv2d(num_hiddens // 2, in_channels, kernel_size=3, padding=1),
+        # Decoder Pipeline: 8x15 -> 128x240 -> Sigmoid
+        self.fc_z = nn.Linear(deterministic_dim + stochastic_dim, self.feat_dim)
+        self.decoder_conv = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            self._make_layer(ResBlock, 64, 128, num_blocks=4, stride=1),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            self._make_layer(ResBlock, 128, num_hiddens, num_blocks=6, stride=1),
+            # 四倍上采样，恢复 128x240 空间分辨率，减少计算
+            UnFocus(num_hiddens, in_channels, block_size=4),
             nn.Sigmoid()
         )
 
-    def _make_layer(self, block, out_channels, num_block, stride):
-        strides = [stride] + [1] * (num_block - 1)
+    def _make_layer(self, block: ResBlock, in_channels, out_channels, num_blocks, stride):
         layers = []
-        for s in strides:
-            layers.append(block(self.in_channels, out_channels, stride=s))
-            self.in_channels = out_channels * block.expansion
+        # 第一块处理 stride 和通道变化
+        layers.append(block(in_channels, out_channels, stride=stride))
+        # 后续块保持通道和分辨率不变
+        for _ in range(1, num_blocks):
+            layers.append(block(out_channels, out_channels, stride=1))
+        # 统一添加全局注意力机制
+        layers.append(SEBlock(out_channels))
         return nn.Sequential(*layers)
 
     def encode(self, obs):
-        h = self.encoder_conv1(obs)
-        h = self.layer1(h)
-        h = self.layer2(h)
-        return h.view(h.size(0), -1)
+        return self.encoder_conv(obs)
 
     def decode(self, h, s):
         z = torch.cat([h, s], dim=-1)
-        h = self.fc_z(z).view(-1, self.num_hiddens * 2 * self.block_expansion, 32, 60)
-        h = self.layer3(h)
-        h = self.upsample1(h)
-        h = self.layer4(h)
-        h = self.upsample2(h)
-        return self.final_conv(h)
+        h = self.fc_z(z).view(-1, 64, 8, 15)
+        return self.decoder_conv(h)

@@ -3,9 +3,7 @@ import sys
 import time
 import torch
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
@@ -47,7 +45,7 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0, latent_dim=25
             kl_per_dim = KLD.item() / (B * latent_dim)
             
             elapsed = time.time() - start_time
-            print(f'[{elapsed:.2f}s] Train Epoch: {epoch} [{batch_idx * B}/{len(train_loader.dataset)} '
+            print(f'[{elapsed:.2f}s] Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
                   f'Loss: {loss.item() / B:.4f} (Pixel MSE: {pixel_mse:.6f}, KL/Dim: {kl_per_dim:.6f})')
             
@@ -138,7 +136,7 @@ def main():
     batch_size = 32
     learning_rate = 1e-3
     epochs = 10
-    latent_dim = 256
+    latent_dim = 512
     beta = 1.0
     # Prediction offset (frame_skip in dataset)
     prediction_offset = 1 
@@ -148,7 +146,7 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
 
     # DataLoader num_workers: Windows 下开启多进程会导致内存占用飙升
-    num_workers = 2 
+    num_workers = 0
     
     # TensorBoard
     writer = SummaryWriter(log_dir)
@@ -162,8 +160,8 @@ def main():
     test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     
     # 模型初始化 - 支持 Conv, ResNet 架构
-    # model = ResNetSekiroVAE(latent_dim=latent_dim).to(device)
-    model = ConvSekiroVAE(latent_dim=latent_dim).to(device)
+    model = ResNetSekiroVAE(latent_dim=latent_dim).to(device)
+    # model = ConvSekiroVAE(latent_dim=latent_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     for epoch in range(1, epochs + 1):

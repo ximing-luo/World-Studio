@@ -90,9 +90,10 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0, stochastic_di
         
         if batch_idx % 10 == 0: # 稍微调低打印频率，减少同步开销
             pixel_mse = batch_recon_loss.item() / (C * H * W)
+            rmse_255 = (pixel_mse ** 0.5) * 255
             kl_per_dim = batch_kl_loss.item() / stochastic_dim 
             elapsed = time.time() - start_time
-            print(f"[{elapsed:.2f}s] Epoch {epoch} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.0f} (Pixel MSE: {pixel_mse:.4f}, KL/Dim: {kl_per_dim:.2f}), Norm: {norm:.0f}")
+            print(f"[{elapsed:.2f}s] Epoch {epoch} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.0f} (Pixel MSE: {pixel_mse:.4f}/{rmse_255:.1f}, KL/Dim: {kl_per_dim:.2f}), Norm: {norm:.0f}")
             
             if writer is not None:
                 step = (epoch - 1) * len(train_loader) + batch_idx
@@ -272,13 +273,14 @@ def eval_task(model, loader, device, beta=1.0, writer=None, epoch=None):
 
 def main():
     # Hyperparameters
-    batch_size = 16
+    batch_size = 8
     learning_rate = 1e-4
     epochs = 30
     beta = 1.0 # KL 权重
-    seq_len = 16
+    seq_len = 8
     stochastic_dim = 64
     deterministic_dim = 512
+    action_dim = 13
     frame_skip = 3
     log_dir = get_log_dir('logs/sekiro/rssm')
     
@@ -302,9 +304,8 @@ def main():
     test_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True) # Reuse dataset for simplicity
 
     # 初始化模型 - 支持 Conv, ResNet 架构
-    # model = ResNetSekiroRSSM(latent_dim=256).to(device)
-    # Action dim = 13 (只狼的动作数据维度)
-    model = ConvSekiroRSSM(in_channels=3, deterministic_dim=deterministic_dim, stochastic_dim=stochastic_dim, action_dim=13).to(device)
+    model = ResNetSekiroRSSM(stochastic_dim=stochastic_dim, deterministic_dim=deterministic_dim, action_dim=action_dim).to(device)
+    # model = ConvSekiroRSSM(in_channels=3, deterministic_dim=deterministic_dim, stochastic_dim=stochastic_dim, action_dim=action_dim).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 

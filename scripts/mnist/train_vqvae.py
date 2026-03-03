@@ -27,9 +27,9 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
 
     # 模型初始化 - 支持 FC, Conv, ResNet 三种架构
-    # model = FCVQVAE(num_embeddings=512, embedding_dim=32).to(device)
+    model = FCVQVAE(num_embeddings=512, embedding_dim=32).to(device)
     # model = ResNetVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
-    model = ConvVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
+    # model = ConvVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     

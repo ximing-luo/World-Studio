@@ -26,8 +26,8 @@ class LazyNPYRecord:
         self.transform = transform
         
         # 内存映射文件
-        self.obs_mmap = np.load(os.path.join(episode_dir, 'obs.npy'), mmap_mode='r')
-        self.action_mmap = np.load(os.path.join(episode_dir, 'action.npy'), mmap_mode='r')
+        self.obs_mmap = np.load(os.path.join(episode_dir, 'obs.npy'), mmap_mode='c')
+        self.action_mmap = np.load(os.path.join(episode_dir, 'action.npy'), mmap_mode='c')
         
         # 假设 obs 形状为 (N, C, H, W) 或 (N, H, W, C)
         # 如果是 (N, H, W, C)，需要在 __getitem__ 中 transpose，但建议原生存为 (N, C, H, W)

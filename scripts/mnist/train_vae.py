@@ -101,9 +101,9 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     
     # 初始化模型 - 支持 FC, Conv, ResNet 三种架构
-    # model = FCVAE(latent_dim=20).to(device)
+    model = FCVAE(latent_dim=20).to(device)
     # model = ResNetVAE(latent_dim=20).to(device)
-    model = ConvVAE(latent_dim=20).to(device)
+    # model = ConvVAE(latent_dim=20).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     

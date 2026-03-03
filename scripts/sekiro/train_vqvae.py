@@ -38,6 +38,7 @@ def train(epoch, model, train_loader, optimizer, device, embedding_dim=64, write
         loss = recon_loss + vq_loss
         
         loss.backward()
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
         total_loss += loss.item()
@@ -52,7 +53,7 @@ def train(epoch, model, train_loader, optimizer, device, embedding_dim=64, write
             elapsed = time.time() - start_time
             print(f'[{elapsed:.2f}s] Train Epoch: {epoch} [{batch_idx * B}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
-                  f'Loss: {loss.item():.4f} (Pixel MSE: {pixel_mse:.6f}, VQ/Dim: {vq_per_dim:.6f})')
+                  f'Loss: {loss.item():.4f} (Pixel MSE: {pixel_mse:.6f}, VQ/Dim: {vq_per_dim:.6f}, Grad Norm: {norm:.4f})')
             
             if writer is not None:
                 step = (epoch - 1) * len(train_loader) + batch_idx
@@ -138,14 +139,14 @@ def main():
     learning_rate = 1e-3
     epochs = 10
     prediction_offset = 1 # 预测未来第几帧
-    num_hiddens = 128
-    num_embeddings = 512
+    num_hiddens = 256
+    num_embeddings = 64
     embedding_dim = 64
     log_dir = get_log_dir('logs/sekiro/vqvae')
     
     # DataLoader num_workers: Windows 下开启多进程会导致内存占用飙升 (每个 worker 复制一份库文件内存)
     # 如果内存不足 (看到 7GB+)，建议设为 0 或 1；若内存充足想要加速，可设为 2-4
-    num_workers = 1 
+    num_workers = 0 
 
     results_dir = 'outputs/results/sekiro/vqvae'
     os.makedirs(results_dir, exist_ok=True)
