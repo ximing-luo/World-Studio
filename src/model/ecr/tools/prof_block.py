@@ -169,64 +169,82 @@ def analyze_block(name, module, input_data, is_training=False):
     print(f"\n>>> Analyzing: {name} (Training={is_training})")
     print(f"{'='*120}")
     
-    # 核心：根据模式设置训练状态，并开启/关闭梯度计算
+    # 核心：根据模式设置训练状态
     if is_training:
         module.train()
     else:
         module.eval()
     
-    # 1. 追踪每一层的显存和算力 (这一步会开启 Hook)
+    # 1. 静态算力分析 (不干扰显存)
     flop_counter = ManualFlopCounter(module)
-    mem_tracker = LayerMemoryTracker(module)
-    
     flop_counter.register_hooks()
-    mem_tracker.register_hooks()
     
-    # 执行一次前向 (仅为了获取每一层的数据)
-    # 注意：在训练模式下，这里必须允许梯度流过，否则 Checkpoint 不会触发
+    # 2. 运行时显存快照 (Timeline Snapshot)
+    device = input_data.device
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    
+    # 快照 1: 基准 (模型 + 输入)
+    base_mem = torch.cuda.memory_allocated(device)
+    torch.cuda.reset_peak_memory_stats(device)
+    
+    # 执行前向
     with torch.set_grad_enabled(is_training):
         module.zero_grad(set_to_none=True)
-        module(input_data)
-    
-    print(f"{'Layer Name':<40} | {'Type':<15} | {'FLOPs (M)':<12} | {'Persistent (MB)':<15} | {'Peak (MB)':<12}")
-    print(f"{'-'*120}")
-    
-    total_flops = 0
-    for l_name in mem_tracker.stats:
-        m_stats = mem_tracker.stats[l_name]
-        f_stats = flop_counter.layer_stats.get(l_name, {'flops': 0})
+        output = module(input_data)
         
-        flops_m = f_stats['flops'] / 1e6
-        total_flops += f_stats['flops']
+        torch.cuda.synchronize()
+        # 快照 2: 前向结束后的留存 (这是验证 GC 的关键点)
+        post_forward_mem = torch.cuda.memory_allocated(device)
+        # 快照 3: 过程中的最高峰值
+        peak_forward_mem = torch.cuda.max_memory_allocated(device)
         
-        # 持久化显存 = 执行后 - 执行前 (表示这一层计算完后，系统依然持有的显存)
-        # 注意：在 GC 模式下，对于内部层，这个值理论上应该很小或为 0 (如果能被正确释放)
-        persistent_mem_mb = (m_stats['mem_after'] - m_stats['mem_before']) / 1024 / 1024
-        # 层内峰值显存 = 峰值 - 执行前 (相对于起始点的增量)
-        peak_mem_mb = (m_stats['mem_peak'] - m_stats['mem_before']) / 1024 / 1024
-        
-        print(f"{l_name:<40} | {m_stats['type']:<15} | {flops_m:<12.4f} | {persistent_mem_mb:<15.4f} | {peak_mem_mb:<12.4f}")
-    
-    # 核心：在测量整体性能前彻底移除所有 Hook，避免干扰 Checkpoint 释放显存
+        if is_training:
+            # 执行反向
+            loss = output.mean()
+            loss.backward()
+            torch.cuda.synchronize()
+            # 快照 4: 反向结束后的留存 (应该包含梯度)
+            post_backward_mem = torch.cuda.memory_allocated(device)
+            peak_total_mem = torch.cuda.max_memory_allocated(device)
+        else:
+            post_backward_mem = post_forward_mem
+            peak_total_mem = peak_forward_mem
+
+    # 移除算力钩子
     flop_counter.remove_hooks()
-    mem_tracker.remove_hooks()
     
-    # 2. 测量整体性能 (此时环境是“纯净”的)
-    avg_time, peak_mem_delta = measure_runtime_memory(module, input_data, is_training=is_training)
-    intensity = total_flops / (peak_mem_delta * 1024 * 1024) if peak_mem_delta > 0 else 0
+    # 计算统计数据 (MB)
+    def to_mb(x): return x / 1024 / 1024
+    
+    retained_act = to_mb(post_forward_mem - base_mem)
+    peak_act = to_mb(peak_forward_mem - base_mem)
+    grad_mem = to_mb(post_backward_mem - post_forward_mem) if is_training else 0
+    
+    total_flops = sum(s['flops'] for s in flop_counter.layer_stats.values())
+    
+    print(f"{'Metric':<40} | {'Value':<20}")
+    print(f"{'-'*65}")
+    print(f"{'Total FLOPs':<40} | {total_flops/1e9:<10.4f} GFLOPs")
+    print(f"{'Base Memory (Model+Input)':<40} | {to_mb(base_mem):<10.2f} MB")
+    print(f"{'Peak Forward Memory (Working)':<40} | {peak_act:<10.2f} MB")
+    print(f"{'Retained Forward Memory (Activations)':<40} | {retained_act:<10.2f} MB")
+    if is_training:
+        print(f"{'Retained Backward Memory (Gradients)':<40} | {grad_mem:<10.2f} MB")
+        print(f"{'Overall Peak Memory':<40} | {to_mb(peak_total_mem - base_mem):<10.2f} MB")
     
     print(f"{'-'*120}")
-    print(f"{'BLOCK TOTAL SUMMARY':<40}")
-    print(f"{'Total FLOPs':<30} | {total_flops/1e9:<15.4f} GFLOPs")
-    print(f"{'Avg Time (per iter)':<30} | {avg_time:<15.4f} ms")
-    print(f"{'Overall Peak Delta (MB)':<30} | {peak_mem_delta:<15.4f} MB")
-    print(f"{'Arithmetic Intensity':<30} | {intensity:<15.4f} FLOPs/Byte")
+    
+    # 核心验证逻辑
+    if "Checkpoint" in name:
+        # 在 GC 模式下，留存的激活值应该只占 5 层总和的极小部分 (约 2 层的大小：输入+输出)
+        print(f"VERIFICATION: Checkpoint mode should have low 'Retained Forward Memory'.")
+        print(f"Current Retained: {retained_act:.2f} MB")
     
     return {
         'flops': total_flops,
-        'time': avg_time,
-        'mem': peak_mem_delta,
-        'intensity': intensity
+        'mem': to_mb(peak_total_mem - base_mem),
+        'retained': retained_act
     }
 
 def run_full_comparison():
@@ -248,28 +266,30 @@ def run_full_comparison():
     # 清理缓存
     torch.cuda.empty_cache()
 
-    # 2. ECR L5 Normal (设置为 5 层)
+    # 2. ECR L5 Normal
     ecr_block = EfficientCrossResBlock(CHANNELS, CHANNELS, num_evolve_layers=5, expansion=2, use_checkpoint=False).to(device)
     ecr_results = analyze_block("ECR L5 (Normal Mode)", ecr_block, input_data, is_training=True)
     
     torch.cuda.empty_cache()
 
-    # 3. ECR L5 Gradient Checkpointing (设置为 5 层)
+    # 3. ECR L5 Gradient Checkpointing
     ecr_block_cp = EfficientCrossResBlock(CHANNELS, CHANNELS, num_evolve_layers=5, expansion=2, use_checkpoint=True).to(device)
     ecr_cp_results = analyze_block("ECR L5 (Checkpoint Mode)", ecr_block_cp, input_data, is_training=True)
 
     print(f"\n{'='*120}")
     print(f"{'FINAL PERFORMANCE REPORT':^120}")
     print(f"{'='*120}")
-    print(f"{'Block Type':<30} | {'GFLOPs':<15} | {'Time (ms)':<15} | {'Mem Delta (MB)':<15} | {'Intensity':<15}")
+    print(f"{'Block Type':<30} | {'GFLOPs':<15} | {'Peak Mem (MB)':<20} | {'Retained Act (MB)':<20}")
     print(f"{'-'*120}")
     
     def print_row(name, res):
-        print(f"{name:<30} | {res['flops']/1e9:<15.4f} | {res['time']:<15.4f} | {res['mem']:<15.4f} | {res['intensity']:<15.4f}")
+        print(f"{name:<30} | {res['flops']/1e9:<15.4f} | {res['mem']:<20.2f} | {res['retained']:<20.2f}")
 
     print_row("ResBlock", res_results)
     print_row("ECR L5 (Normal)", ecr_results)
     print_row("ECR L5 (Checkpoint)", ecr_cp_results)
+    print(f"{'='*120}")
+    print(f"CONCLUSION: Compare 'Retained Act' of Normal vs Checkpoint. Checkpoint should be ~1/3 of Normal.")
     print(f"{'='*120}\n")
 
 if __name__ == "__main__":

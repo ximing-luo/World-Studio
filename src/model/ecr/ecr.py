@@ -58,10 +58,9 @@ class EfficientEvolutionLayer(nn.Module):
     def __init__(self, channels, kernel_size=3):
         super().__init__()
         self.conv = nn.Sequential(
-            # 极致优化: 去掉 Norm，开启 bias 作为基础偏移，大幅节省显存和计算
-            nn.SiLU(), # 去掉 inplace，兼容 Gradient Checkpointing
-            nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2, groups=channels, bias=True),
-            RMSNorm2d(channels)
+            # 极致优化: 使用 ReLU 代替 LeakyReLU，保持 1-bit mask 级别的显存优势
+            nn.ReLU(inplace=False), # 必须为 False，否则会破坏残差连接的输入 x
+            nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2, groups=channels, bias=True)
         )
         
     def forward(self, x):
@@ -125,7 +124,6 @@ class EfficientCrossResBlock(nn.Module):
         x = self.seblock(x)
         # 2. N层内部自演化 (通过内部残差保持记忆)
         if self.use_checkpoint and self.training:
-            # 整体开启 Checkpoint，极致显存优化：仅保留序列入口输入
             x = checkpoint(self.evolution, x, use_reentrant=False)
         else:
             x = self.evolution(x)
