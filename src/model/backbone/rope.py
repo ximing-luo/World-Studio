@@ -12,17 +12,53 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None):
     """
     应用 RoPE 到 Query 和 Key
     """
+    # 统一增加维度以便广播: (B, H, T, D)
+    # cos/sin shape: (T_max, D)
     if position_ids is not None:
-        # 动态选取对应的 cos/sin: [batch, 1, seq_len, dim]
-        cos = cos[position_ids].unsqueeze(1)
-        sin = sin[position_ids].unsqueeze(1)
+        # position_ids shape: (B, T)
+        cos = cos[position_ids].unsqueeze(1) # (B, 1, T, D)
+        sin = sin[position_ids].unsqueeze(1) # (B, 1, T, D)
     else:
-        # 默认切片: [1, 1, seq_len, dim]
-        cos = cos[:q.size(2)].unsqueeze(0).unsqueeze(0)
-        sin = sin[:q.size(2)].unsqueeze(0).unsqueeze(0)
+        # q shape: (B, H, T, D)
+        # 如果是全量推理，T=T_total，取前 T 个
+        # 如果是增量推理，T=1，但它对应的位置应该是 T_total-1
+        # 为了通用性，如果没有 position_ids，我们假设 q 对应的是序列的最后 T 个位置
+        q_len = q.size(2)
+        total_len = cos.size(0)
+        cos = cos[total_len - q_len : total_len].unsqueeze(0).unsqueeze(0) # (1, 1, T, D)
+        sin = sin[total_len - q_len : total_len].unsqueeze(0).unsqueeze(0) # (1, 1, T, D)
+    
+    # k 可能比 q 长 (KV Cache)
+    # k shape: (B, H, T_total, D)
+    if k.size(2) != q.size(2):
+        # 如果 k 比较长，说明有 cache，k 应该应用全量的 cos/sin
+        if position_ids is not None:
+             # 这里逻辑会复杂点，通常推理时 position_ids 只给当前 step 的
+             # 但 apply_rotary_pos_emb 应该对全量 k 应用
+             # 实际上，在 KV Cache 模式下，我们通常只对新增的 k[..., -1:, :] 应用 RoPE
+             # 或者在拼接前应用。为了简化，我们假设传入的 k 已经是应用过 RoPE 的或者需要全量应用。
+             # 在我们的 LatentAttention 中，k_pe 是全量传入的。
+             k_cos = cos # 这里的逻辑需要根据调用方调整
+             k_sin = sin
+        else:
+             k_cos = cos # 默认 fallback
+             k_sin = sin
+             # 如果 k 是全量的，我们需要全量的 cos/sin
+             if k.size(2) == total_len:
+                 k_cos = cos.new_tensor(cos.storage()[:total_len]).view(1, 1, total_len, -1)
+                 k_sin = sin.new_tensor(sin.storage()[:total_len]).view(1, 1, total_len, -1)
     
     q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
+    # 对于 k，由于 LatentAttention 传入的是全量 k_pe_out，需要匹配长度
+    if k.size(2) > q.size(2):
+        # 这里的 cos/sin 也要扩展到 k 的长度
+        # 简单处理：假设 k 对应 [0, T_total)
+        total_cos = cos.new_tensor(cos.storage()[:k.size(2)]).view(1, 1, k.size(2), -1)
+        total_sin = sin.new_tensor(sin.storage()[:k.size(2)]).view(1, 1, k.size(2), -1)
+        k_embed = (k * total_cos) + (rotate_half(k) * total_sin)
+    else:
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+        
     return q_embed, k_embed
 
 class RotaryEmbedding(nn.Module):

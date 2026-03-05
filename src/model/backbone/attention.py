@@ -134,8 +134,9 @@ class LatentAttention(nn.Module):
         self.kv_lora_rank = config.kv_lora_rank
         self.q_lora_rank = config.q_lora_rank
         self.rope_head_dim = config.qk_rope_head_dim
-        self.kv_head_dim = self.head_size 
-        self.q_head_dim = self.head_size
+        # 支持从 config 获取具体的 nope/v 维度，否则回退到 head_size
+        self.q_head_dim = getattr(config, 'qk_nope_head_dim', self.head_size)
+        self.kv_head_dim = getattr(config, 'v_head_dim', self.head_size)
         
         # Query Compression: x -> c_Q -> [q_nop, q_pe]
         self.q_down_proj = nn.Linear(config.hidden_dim, self.q_lora_rank, bias=config.bias)
@@ -171,7 +172,7 @@ class LatentAttention(nn.Module):
         self.softmax_scale = ((self.q_head_dim + self.rope_head_dim) ** -0.5) * mscale
         self.is_causal = getattr(config, 'is_causal', True)
     
-    def forward(self, x, position_ids=None):
+    def forward(self, x, position_ids=None, past_key_value=None, use_cache=False):
         B, T, C = x.shape
         
         # 1. Query Generation
@@ -187,37 +188,66 @@ class LatentAttention(nn.Module):
         k_nop = k_nop.view(B, T, self.n_kv_head, self.kv_head_dim)
         v = v.view(B, T, self.n_kv_head, self.kv_head_dim)
         
-        # Grouped KV Expansion
+        # Grouped KV Expansion (to Match Head Num)
         if self.n_kv_head != self.n_head:
             group_size = self.n_head // self.n_kv_head
-            # 使用 expand 优化显存
             k_nop = k_nop.unsqueeze(3).expand(-1, -1, -1, group_size, -1).reshape(B, T, self.n_head, self.kv_head_dim)
             v = v.unsqueeze(3).expand(-1, -1, -1, group_size, -1).reshape(B, T, self.n_head, self.kv_head_dim)
         
         # k_pe Generation (Shared & Normalized)
         k_pe = self.k_pe_norm(self.k_pe_proj(x)).view(B, T, 1, self.rope_head_dim)
+
+        # 3. KV Cache Handling
+        if past_key_value is not None:
+            prev_k_nop, prev_v, prev_k_pe = past_key_value
+            k_nop = torch.cat([prev_k_nop, k_nop], dim=1)
+            v = torch.cat([prev_v, v], dim=1)
+            k_pe = torch.cat([prev_k_pe, k_pe], dim=1)
         
-        # 3. RoPE Application (Only to PE parts)
+        present_key_value = (k_nop, v, k_pe) if use_cache else None
+        
+        # 更新当前总长度用于 RoPE
+        T_total = k_nop.size(1)
+
+        # 4. RoPE Application (Only to PE parts)
         # Transpose to (B, H, T, D)
         q_nop, q_pe = q_nop.transpose(1, 2), q_pe.transpose(1, 2)
-        k_nop, k_pe = k_nop.transpose(1, 2), k_pe.transpose(1, 2) # k_pe: (B, 1, T, D)
-        v = v.transpose(1, 2)
+        k_nop_out, k_pe_out = k_nop.transpose(1, 2), k_pe.transpose(1, 2) 
+        v_out = v.transpose(1, 2)
         
-        cos, sin = self.rotary_emb(v, seq_len=T)
-        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids=position_ids)
+        # 获取全量 cos/sin，长度应为 T_total
+        cos, sin = self.rotary_emb(v_out, seq_len=T_total)
         
-        # Broadcast k_pe to all heads
-        k_pe = k_pe.expand(-1, self.n_head, -1, -1)
+        # 应用 RoPE 到当前 query 和全量 key 的位置部分
+        # q_pe 对应 [T_total-T, T_total) 位置，k_pe_out 对应 [0, T_total) 位置
+        # 我们手动构造 position_ids 来确保 apply_rotary_pos_emb 逻辑正确
+        q_position_ids = torch.arange(T_total - T, T_total, device=x.device).unsqueeze(0).expand(B, -1)
+        k_position_ids = torch.arange(0, T_total, device=x.device).unsqueeze(0).expand(B, -1)
         
-        # 4. Attention Calculation
+        q_pe, _ = apply_rotary_pos_emb(q_pe, q_pe, cos, sin, position_ids=q_position_ids)
+        _, k_pe_out = apply_rotary_pos_emb(k_pe_out, k_pe_out, cos, sin, position_ids=k_position_ids)
+        
+        # 广播 k_pe 到所有头
+        k_pe_out = k_pe_out.expand(-1, self.n_head, -1, -1)
+        
+        # 5. Attention Calculation
         # 拼接 content 和 pe 部分
         q = torch.cat([q_nop, q_pe], dim=-1)
-        k = torch.cat([k_nop, k_pe], dim=-1)
+        k = torch.cat([k_nop_out, k_pe_out], dim=-1)
         
+        # 推理模式下（T=1 且有缓存），通常不需要因果掩码，或者由 T_total 自动处理
+        # 这里为了兼容性，如果 T > 1 则保持 is_causal
+        is_causal = self.is_causal if T > 1 else False
+
         y = F.scaled_dot_product_attention(
-            q.contiguous(), k.contiguous(), v.contiguous(),
-            attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=self.is_causal,
+            q.contiguous(), k.contiguous(), v_out.contiguous(),
+            attn_mask=None, dropout_p=self.dropout if self.training else 0, 
+            is_causal=is_causal,
             scale=self.softmax_scale
         )
         
-        return self.att_dropout(self.c_proj(y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.kv_head_dim)))
+        attn_out = self.att_dropout(self.c_proj(y.transpose(1, 2).contiguous().view(B, T, self.n_head * self.kv_head_dim)))
+        
+        if use_cache:
+            return attn_out, present_key_value
+        return attn_out

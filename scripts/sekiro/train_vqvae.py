@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 # 添加项目根目录到路径
 path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(path)
+sys.path.append(os.path.join(path, 'src'))
 
 from src.datasets.sekiro import Sekiro_VQVAE_Dataset
 from src.model.sekiro.vq_vae import ConvSekiroVQVAE, ResNetSekiroVQVAE
@@ -40,8 +41,8 @@ def train(epoch, model, discriminator, train_loader, optimizer_G, optimizer_D, p
         # ----------------------------
         optimizer_G.zero_grad()
         
-        # 重构/预测
-        recon_batch, vq_loss = model(data)
+        # 直接调用模型 forward
+        recon_batch, vq_loss, _ = model(data)
         
         # (a) 基础重建损失
         recon_loss = F.mse_loss(recon_batch, target)
@@ -107,7 +108,8 @@ def visualize(model, loader, device, epoch, writer=None):
         data, target, action = next(iter(loader))
         data = data.to(device).float() / 255.0
         target = target.to(device).float() / 255.0
-        recon, _ = model(data)
+        # 直接调用模型 forward
+        recon, _, _ = model(data)
         
         n = min(data.size(0), 5)
         fig, axes = plt.subplots(3, n, figsize=(n*3, 9))
@@ -149,7 +151,9 @@ def eval_task(model, loader, device, writer=None, epoch=None, perceptual_loss_fn
             data = data.to(device).float() / 255.0
             target = target.to(device).float() / 255.0
             
-            recon_batch, vq_loss = model(data)
+            # 直接调用模型 forward
+            recon_batch, vq_loss, _ = model(data)
+            
             recon_loss = F.mse_loss(recon_batch, target)
             
             p_loss = 0
@@ -211,7 +215,20 @@ def main():
     
     # 模型初始化 - 支持 Conv, ResNet 架构
     # model = ResNetSekiroVQVAE(in_channels=3, num_hiddens=num_hiddens, num_embeddings=num_embeddings, embedding_dim=embedding_dim).to(device)
-    model = ConvSekiroVQVAE(in_channels=3, num_hiddens=num_hiddens, num_embeddings=num_embeddings, embedding_dim=embedding_dim).to(device)
+    # model = ConvSekiroVQVAE(in_channels=3, num_hiddens=num_hiddens, num_embeddings=num_embeddings, embedding_dim=embedding_dim).to(device)
+    
+    from world.vision.sekiro import SekiroConv
+    from world.projection.projection import SpatialProjection
+    from world.latents.vq import VQLatent
+    from world.dream.vae import StaticReconstruction
+
+    vision = SekiroConv()
+    # SekiroConv 输出通道 512，H=4, W=7 (128x240 -> 4x7)
+    # 投影到 embedding_dim 通道的空间潜空间
+    proj = SpatialProjection(512, embedding_dim, 4, 7, is_vae=False)
+    latent = VQLatent(num_embeddings, embedding_dim)
+    
+    model = StaticReconstruction(vision, proj, latent).to(device)
     
     # 判别器与损失函数初始化
     discriminator = PatchGANDiscriminator(input_nc=3).to(device)

@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 # 添加项目根目录到路径
 path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(path)
+sys.path.append(os.path.join(path, 'src'))
 
 from src.datasets.sekiro import Sekiro_VAE_Dataset
 from src.model.sekiro.vae import ConvSekiroVAE, ResNetSekiroVAE
@@ -28,10 +29,15 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0, latent_dim=25
         B, C, H, W = data.size()
         
         optimizer.zero_grad()
-        recon_batch, mu, logvar = model(data)
+        # 直接调用模型 forward，返回重构图、隐空间 Loss (VAE 为 KL 散度项)、以及原始 tokens (用于 mu, logvar)
+        recon_batch, latent_loss, tokens = model(data)
         
+        # 拆分 mu 和 logvar (用于原脚本计算损失)
+        mu, logvar = torch.chunk(tokens, 2, dim=-1)
+
         # 任务：输入当前帧，重建/预测下一帧 (Target 为 next_obs)
-        loss, recon_loss, KLD = loss_function(recon_batch, target, mu, logvar, beta, loss_type='mse')
+        loss_outputs = loss_function(recon_batch, target, mu, logvar, beta, loss_type='mse')
+        loss, recon_loss, KLD = loss_outputs[0], loss_outputs[1], loss_outputs[2]
         loss.backward()
         
         train_loss += loss.item()
@@ -66,6 +72,7 @@ def visualize(model, loader, device, epoch, writer=None):
         data, target, action = next(iter(loader))
         data = data.to(device).float() / 255.0
         target = target.to(device).float() / 255.0
+        # 直接调用模型 forward
         recon, _, _ = model(data)
         
         n = min(data.size(0), 5)
@@ -110,8 +117,14 @@ def eval_task(model, loader, device, beta=1.0, writer=None, epoch=None):
             data = data.to(device).float() / 255.0
             target = target.to(device).float() / 255.0
             
-            recon_batch, mu, logvar = model(data)
-            loss, recon_loss, KLD = loss_function(recon_batch, target, mu, logvar, beta, loss_type='mse')
+            # 直接调用模型 forward
+            recon_batch, latent_loss, tokens = model(data)
+            
+            # 拆分 mu 和 logvar (用于原脚本计算损失)
+            mu, logvar = torch.chunk(tokens, 2, dim=-1)
+            
+            loss_outputs = loss_function(recon_batch, target, mu, logvar, beta, loss_type='mse')
+            loss, recon_loss, KLD = loss_outputs[0], loss_outputs[1], loss_outputs[2]
             
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
@@ -159,12 +172,18 @@ def main():
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     
-    # 模型初始化 - 支持 Conv, ResNet, EfficientCross 架构
-    # model = EfficientCrossSekiroVAE(latent_dim=latent_dim, num_evolve_layers=2).to(device)
-    # model = ResNetSekiroVAE(latent_dim=latent_dim).to(device)
-    # model = ConvSekiroVAE(latent_dim=latent_dim).to(device)
-    from src.model.sekiro.vae import BrainResNetSekiroVAE
-    model = BrainResNetSekiroVAE(latent_dim=latent_dim).to(device)
+    from world.vision.sekiro import SekiroConv
+    from world.projection.projection import SpatialProjection
+    from world.latents.vae import VAELatent
+    from world.dream.vae import StaticReconstruction
+
+    vision = SekiroConv()
+    # SekiroConv 输出通道 512，H=4, W=7 (128x240 -> 4x7)
+    # 投影到 16 通道的空间潜空间，并设为随机投影 (is_vae=True)
+    proj = SpatialProjection(512, 16, 4, 7, is_vae=True)
+    latent = VAELatent()
+    
+    model = StaticReconstruction(vision, proj, latent).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     for epoch in range(1, epochs + 1):

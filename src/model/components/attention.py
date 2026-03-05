@@ -86,8 +86,6 @@ class UnFocus(nn.Module):
         x = self.act(self.norm(self.conv(x)))
         return F.pixel_shuffle(x, self.block_size)
 
-from src.model.backbone.model import ThinkingSpace
-
 class AttentionPooling(nn.Module):
     """
     注意力池化 (Attention Pooling)
