@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from src.model.components.ecr import RMSNorm2d, EfficientEvolutionLayer, CrossScholarFusion
+from src.model.ecr.ecr import EfficientEvolutionLayer, CrossScholarFusion
+from src.model.backbone.rms import RMSNorm2d
 
 class BasicBlock(nn.Module):
     """Basic Block for resnet 18 and resnet 34

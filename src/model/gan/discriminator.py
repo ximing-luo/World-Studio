@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch
-import torch.nn as nn
 
 class DiscBlock(nn.Module):
     """判别器基础块：卷积 -> 归一化 -> 激活"""

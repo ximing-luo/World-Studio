@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from .rms import RMSNorm, RMSNorm2d
-from .attention import SEBlock
+from src.model.backbone.rms import RMSNorm, RMSNorm2d
+from src.model.components.attention import SEBlock
 
 class CrossScholarFusion(nn.Module):
     """
