@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from src.model.backbone.rms import RMSNorm2d
+from src.model.ecr.norm import RMSNorm2d
 
 class Focus(nn.Module):
     """

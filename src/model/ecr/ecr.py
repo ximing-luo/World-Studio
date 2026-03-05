@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
-from src.model.backbone.rms import RMSNorm, RMSNorm2d
 from src.model.components.attention import SEBlock
+from src.model.ecr.norm import RMSNorm2d, LayerNorm2d
 
 class CrossScholarFusion(nn.Module):
     """
@@ -15,8 +15,12 @@ class CrossScholarFusion(nn.Module):
     3. 核心逻辑: 利用低秩近似 (Low-rank Approximation) 实现类似交叉注意力的全局通道融合。
     4. 计算优化: 利用结合律 W_Q @ (W_K @ X)，将计算复杂度从 O(C^2) 降低到 O(C * L)，其中 L 为潜空间维度 (16)。
     """
-    def __init__(self, in_channels, out_channels, latent_dim=16):
+    def __init__(self, in_channels, out_channels, latent_dim=None):
         super().__init__()
+        if latent_dim is None:
+            latent_dim = in_channels // 16
+        if latent_dim < 8:
+            latent_dim = 8
         self.latent_dim = latent_dim
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -27,7 +31,7 @@ class CrossScholarFusion(nn.Module):
         self.W_Q = nn.Parameter(torch.randn(out_channels, latent_dim) * 0.02)
         
         self.norm = RMSNorm2d(latent_dim)
-        self.act = nn.SiLU(inplace=True)
+        self.act = nn.SiLU() # 去掉 inplace，兼容 Gradient Checkpointing
 
     def forward(self, x):
         # 1. 投影到潜空间 (分类): (B, latent_dim, H, W) = W_K @ X
@@ -55,8 +59,9 @@ class EfficientEvolutionLayer(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             # 极致优化: 去掉 Norm，开启 bias 作为基础偏移，大幅节省显存和计算
+            nn.SiLU(), # 去掉 inplace，兼容 Gradient Checkpointing
             nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2, groups=channels, bias=True),
-            nn.SiLU(inplace=True)
+            RMSNorm2d(channels)
         )
         
     def forward(self, x):
@@ -82,25 +87,23 @@ class EfficientCrossResBlock(nn.Module):
         mid_channels = in_channels * expansion
         
         # 0. Shortcut 路径 (保证梯度回传的黄金通道)
-        if stride != 1 or in_channels != mid_channels:
+        self.shortcut = nn.Identity()
+        if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.AvgPool2d(kernel_size=stride, stride=stride, ceil_mode=True) if stride > 1 else nn.Identity(),
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
-                nn.GroupNorm(min(8, out_channels), out_channels)
+                CrossScholarFusion(in_channels, out_channels),
+                LayerNorm2d(out_channels)
             )
-        else:
-            self.shortcut = nn.Identity()
 
         # 1. 分组膨胀与下采样 (Expansion & Downsample)
         # 用极低成本的分组卷积实现通道暴涨，物理隔离通道
         self.expand = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, groups=in_channels, bias=False),
-            nn.GroupNorm(min(8, mid_channels), mid_channels),
-            nn.SiLU(inplace=True)
+            LayerNorm2d(in_channels),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, groups=in_channels, bias=False)
         )
-
-        self.seblock = SEBlock(mid_channels, reduction=4)
         
+        self.seblock = SEBlock(mid_channels, reduction=4)
+
         # 2. 高效演化 (Evolution)
         # 堆叠 N 层深度残差，积累空间特征记忆
         self.evolution = nn.Sequential(*[
@@ -109,52 +112,43 @@ class EfficientCrossResBlock(nn.Module):
         
         # 3. 交叉融合 (Thinking Fusion)
         # 使用低秩交叉注意力机制进行全局通道整合
-        self.fusion = CrossScholarFusion(mid_channels, out_channels, latent_dim=16)
+        self.fusion = CrossScholarFusion(mid_channels, out_channels)
 
-        # 尝试自动优化演化层 (解决 Windows 下 compile 不稳定问题)
-        # 注意: 开启优化后，第一次前向传播可能会略慢(编译开销)
-        # 警告: Gradient Checkpointing 与 jit.script 同时开启在某些 PyTorch 版本中会导致 Backward 崩溃
-        import platform
-        is_windows = platform.system() == "Windows"
-        
-        if not self.use_checkpoint:
-            try:
-                if is_windows:
-                    # Windows 下优先使用稳定的 torch.jit.script
-                    self.evolution = torch.jit.script(self.evolution)
-                else:
-                    # Linux/Unix 下优先使用强大的 torch.compile
-                    if hasattr(torch, "compile"):
-                        self.evolution = torch.compile(self.evolution)
-                    else:
-                        self.evolution = torch.jit.script(self.evolution)
-            except Exception:
-                # 如果优化失败，回退到原始模型
-                pass
-        else:
-            # 如果使用了 Checkpoint，为了兼容性不进行 JIT/Compile 优化
-            # 除非明确知道该版本的 PyTorch 支持这种组合
-            pass
+        # 4. 自动优化演化层 (根据系统环境选择最佳编译方案)
+        # self._optimize_evolution()
 
     def forward(self, x):
         # 0. 黄金通道 (Shortcut)
         identity = self.shortcut(x)
-
         # 1. 膨胀下采样 (建立高维特征空间)
         x = self.expand(x)
         x = self.seblock(x)
-        
         # 2. N层内部自演化 (通过内部残差保持记忆)
         if self.use_checkpoint and self.training:
-            # 使用梯度检查点，仅在训练模式下生效
-            # 将 evolution 作为一个整体块进行检查点包装
+            # 整体开启 Checkpoint，极致显存优化：仅保留序列入口输入
             x = checkpoint(self.evolution, x, use_reentrant=False)
         else:
             x = self.evolution(x)
-            
         # 3. 交叉注意力融合 (全局语义集成)
         x = self.fusion(x)
-        
         # 4. 最终集成: 演化结果 + 原始映射
-        return nn.SiLU(inplace=True)(x + identity)
+        return x + identity
+
+    def _optimize_evolution(self):
+        """尝试自动优化演化层 (解决 Windows 下 compile 不稳定问题)"""
+        import platform
+        is_windows = platform.system() == "Windows"
+        try:
+            if is_windows:
+                 # Gradient Checkpointing 与 JIT/Compile 组合在旧版本中不稳定
+                if self.use_checkpoint: return
+                # Windows 下优先使用稳定的 torch.jit.script
+                self.evolution = torch.jit.script(self.evolution)
+            elif hasattr(torch, "compile"):
+                # Linux/Unix 下优先使用强大的 torch.compile
+                self.evolution = torch.compile(self.evolution)
+            else:
+                self.evolution = torch.jit.script(self.evolution)
+        except Exception:
+            pass # 如果优化失败，回退到原始模型
 

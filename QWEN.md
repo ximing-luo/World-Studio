@@ -35,8 +35,6 @@ World-Studio/
 │   │   ├── train_jepa.py     # 只狼 JEPA 训练脚本
 │   │   └── train_rssm.py     # 只狼 RSSM 训练脚本
 │   └── tools/
-│       ├── prof_block.py     # 性能分析工具
-│       ├── prof_fusion.py    # 融合操作分析
 │       └── prof_model.py     # 模型分析
 ├── src/
 │   ├── datasets/
@@ -52,11 +50,16 @@ World-Studio/
 │   │   │   └── vision.py     # 视觉投影层
 │   │   ├── components/       # 模型通用组件
 │   │   │   ├── attention.py  # 注意力机制
-│   │   │   ├── discriminator.py # 判别器
-│   │   │   ├── ecr.py        # 高效演化层
+│   │   │   ├── focus.py      # 空间专注层 (Focus/UnFocus)
 │   │   │   ├── loss.py       # 损失函数 (含感知损失)
-│   │   │   ├── resnet.py     # ResNet 残差块 (Basic/BottleNeck/ResBlock/EResBlock)
-│   │   │   └── rms.py        # RMS 归一化
+│   │   │   └── resnet.py     # ResNet 残差块 (Basic/BottleNeck/ResBlock)
+│   │   ├── ecr/              # 高效演化层 (ECR)
+│   │   │   ├── ecr.py        # 核心逻辑
+│   │   │   └── tools/        # ECR 专项性能分析
+│   │   │       ├── prof_block.py   # 模块级性能诊断
+│   │   │       └── prof_fusion.py  # 融合策略对比
+│   │   ├── gan/              # 判别器组件
+│   │   │   └── discriminator.py
 │   │   └── world/            # 世界模型实现 (基础架构)
 │   │       ├── jepa.py       # JEPA 模型基类
 │   │       ├── rssm.py       # RSSM 模型基类

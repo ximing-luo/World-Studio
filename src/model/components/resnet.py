@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-from src.model.ecr.ecr import EfficientEvolutionLayer, CrossScholarFusion
-from src.model.backbone.rms import RMSNorm2d
+from src.model.ecr.norm import RMSNorm2d
 
 class BasicBlock(nn.Module):
     """Basic Block for resnet 18 and resnet 34
@@ -90,7 +89,7 @@ class ResBlock(nn.Module):
             
         self.residual_function = nn.Sequential(
             # 1. 投影层: in -> mid (SiLU)
-            nn.Conv2d(in_channels, mid_channels, kernel_size=1, groups=in_channels, bias=False),
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False),
             nn.SiLU(inplace=True),
             # 中继归一化：压制由于通道扩张导致的内部数值膨胀
             nn.GroupNorm(min(8, mid_channels), mid_channels),
@@ -129,6 +128,7 @@ class EResBlock(nn.Module):
     """
     def __init__(self, in_channels, out_channels, mid_channels=None, stride=1, num_evolve_layers=3):
         super().__init__()
+        from src.model.ecr.ecr import EfficientEvolutionLayer, CrossScholarFusion
         
         if mid_channels is None:
             mid_channels = out_channels * 2 # 默认放大 4 倍

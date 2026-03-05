@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from src.model.components.resnet import BottleNeck
-from src.model.components.ecr import EfficientCrossResBlock
+from src.model.ecr.ecr import EfficientCrossResBlock
 from .base import BaseVision, ThinkingSpace
 
 class SekiroConv(BaseVision):
