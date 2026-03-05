@@ -30,19 +30,29 @@ class ConvSekiroVQVAE(BaseSekiroVQVAE):
         # Encoder: 128x240 -> 64x120 -> 32x60 -> 16x30
         self.encoder_conv = nn.Sequential(
             nn.Conv2d(in_channels, num_hiddens//2, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.GroupNorm(8, num_hiddens//2),
+            nn.ReLU(inplace=True),
             nn.Conv2d(num_hiddens//2, num_hiddens, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(num_hiddens, embedding_dim, kernel_size=4, stride=2, padding=1)
+            nn.GroupNorm(8, num_hiddens),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(num_hiddens, embedding_dim, kernel_size=4, stride=2, padding=1),
+            nn.Tanh() # 关键：将特征值限制在 (-1, 1) 之间，防止漂移过远导致 VQ Loss 爆炸
         )
         
         # Decoder: 16x30 -> 32x60 -> 64x120 -> 128x240
         self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(embedding_dim, num_hiddens, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(num_hiddens, num_hiddens//2, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(num_hiddens//2, in_channels, kernel_size=4, stride=2, padding=1),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(embedding_dim, num_hiddens, kernel_size=3, padding=1),
+            nn.GroupNorm(8, num_hiddens),
+            nn.ReLU(inplace=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(num_hiddens, num_hiddens//2, kernel_size=3, padding=1),
+            nn.GroupNorm(8, num_hiddens//2),
+            nn.ReLU(inplace=True),
+            # 最后一层：先通过卷积减少通道到 16，再上采样，这样显存占用能减小 ~80%
+            nn.Conv2d(num_hiddens//2, 16, kernel_size=3, padding=1),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(16, in_channels, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
 

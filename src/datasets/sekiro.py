@@ -110,11 +110,15 @@ class Sekiro_VAE_Dataset(Sekiro_BaseDataset):
         self.frame_skip = frame_skip
         self.pairs = [] # 存储 (record_idx, start_idx, end_idx)
         for i, record in enumerate(self.records):
-            # record 里的每个 element 是 {'obs':..., 'next_obs':..., 'action':...}
-            # 如果 frame_skip=1, 就是原来的逻辑（预测下一帧）
-            # 如果 frame_skip=10, 我们用 record[i]['obs'] 预测 record[i+frame_skip-1]['next_obs']
-            for j in range(len(record) - frame_skip + 1):
-                self.pairs.append((i, j, j + frame_skip - 1))
+            # 如果 frame_skip=0, 目标就是当前帧 (自编码重建)
+            if frame_skip == 0:
+                for j in range(len(record) + 1): # 包含最后一帧
+                    self.pairs.append((i, j, j))
+            else:
+                # 如果 frame_skip=1, 就是预测下一帧
+                # 我们用 record[j]['obs'] 预测 record[j+frame_skip-1]['next_obs']
+                for j in range(len(record) - frame_skip + 1):
+                    self.pairs.append((i, j, j + frame_skip - 1))
 
     def __len__(self):
         return len(self.pairs)
@@ -123,9 +127,18 @@ class Sekiro_VAE_Dataset(Sekiro_BaseDataset):
         record_idx, start_idx, end_idx = self.pairs[idx]
         record = self.records[record_idx]
         
-        obs = record[start_idx]['obs']
-        target_obs = record[end_idx]['next_obs']
-        action = record[start_idx]['action'] # 记录起始时刻的动作
+        if self.frame_skip == 0:
+            # 自编码模式：target 就是 obs
+            # 兼容处理：LazyNPYRecord[len] 会越界，所以这里直接读 obs_mmap
+            obs_raw = record.obs_mmap[start_idx]
+            if obs_raw.shape[0] > 3: obs_raw = obs_raw.transpose(2, 0, 1)
+            obs = preprocess_sekiro_img(obs_raw, record.transform)
+            target_obs = obs
+            action = torch.from_numpy(record.action_mmap[min(start_idx, len(record)-1)]).float()
+        else:
+            obs = record[start_idx]['obs']
+            target_obs = record[end_idx]['next_obs']
+            action = record[start_idx]['action']
         
         return obs, target_obs, action
 

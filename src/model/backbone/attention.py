@@ -16,13 +16,15 @@ class SingleHeadAttention(nn.Module):
         self.head_size = head_size
         self.register_buffer('attention_mask', torch.tril(torch.ones(config.max_seq_len, config.max_seq_len)))
         self.dropout = nn.Dropout(config.dropout)
+        self.is_causal = getattr(config, 'is_causal', True)
 
     def forward(self, x):
         batch_size, seq_len, _ = x.size()
         k, v, q = self.key(x), self.value(x), self.query(x)
         # Scaled Dot-Product Attention
         weight = q @ k.transpose(-2, -1) / math.sqrt(self.head_size)
-        weight = weight.masked_fill(self.attention_mask[:seq_len, :seq_len] == 0, float('-inf'))
+        if self.is_causal:
+            weight = weight.masked_fill(self.attention_mask[:seq_len, :seq_len] == 0, float('-inf'))
         return F.softmax(weight, dim=-1) @ v
 
 class MultiHeadAttention(nn.Module):
@@ -50,6 +52,7 @@ class FlashAttention(nn.Module):
         self.dropout = config.dropout
         self.att_dropout = nn.Dropout(self.dropout)
         self.c_proj = nn.Linear(self.hidden_dim, self.hidden_dim, bias=config.bias)
+        self.is_causal = getattr(config, 'is_causal', True)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -61,7 +64,7 @@ class FlashAttention(nn.Module):
         y = F.scaled_dot_product_attention(
             q, k, v, attn_mask=None,
             dropout_p=self.dropout if self.training else 0,
-            is_causal=True
+            is_causal=self.is_causal
         )
         return self.att_dropout(self.c_proj(y.transpose(1, 2).contiguous().view(B, T, C)))
 
@@ -88,6 +91,7 @@ class GroupedQueryAttention(nn.Module):
         self.dropout = config.dropout
         self.att_dropout = nn.Dropout(self.dropout)
         self.c_proj = nn.Linear(config.hidden_dim, config.hidden_dim, bias=config.bias)
+        self.is_causal = getattr(config, 'is_causal', True)
 
     def forward(self, x, position_ids=None):
         B, T, C = x.shape
@@ -110,7 +114,7 @@ class GroupedQueryAttention(nn.Module):
 
         y = F.scaled_dot_product_attention(
             q.contiguous(), k.contiguous(), v.contiguous(),
-            attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True
+            attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=self.is_causal
         )
         return self.att_dropout(self.c_proj(y.transpose(1, 2).contiguous().view(B, T, C)))
 
@@ -165,6 +169,7 @@ class LatentAttention(nn.Module):
         # 融合 YaRN 的 mscale 因子 (如果存在)
         mscale = getattr(self.rotary_emb, "mscale", 1.0)
         self.softmax_scale = ((self.q_head_dim + self.rope_head_dim) ** -0.5) * mscale
+        self.is_causal = getattr(config, 'is_causal', True)
     
     def forward(self, x, position_ids=None):
         B, T, C = x.shape
@@ -211,7 +216,7 @@ class LatentAttention(nn.Module):
         
         y = F.scaled_dot_product_attention(
             q.contiguous(), k.contiguous(), v.contiguous(),
-            attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True,
+            attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=self.is_causal,
             scale=self.softmax_scale
         )
         

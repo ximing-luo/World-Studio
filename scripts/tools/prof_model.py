@@ -25,8 +25,9 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def analyze_memory(model, input_size, batch_size=64):
-    # 模拟输入
-    x = torch.randn(batch_size, *input_size)
+    # 模拟输入，使用与模型相同的设备
+    device = next(model.parameters()).device
+    x = torch.randn(batch_size, *input_size).to(device)
     
     print(f"\n{'='*100}")
     print(f"{'Layer (Type)':<30} | {'Input Shape':<20} | {'Output Shape':<20} | {'Params':<10} | {'Act. Mem (MB)':<8}")
@@ -99,7 +100,7 @@ def analyze_memory(model, input_size, batch_size=64):
             if len(in_shape_str) > 20: in_shape_str = "..." + in_shape_str[-17:]
             if len(out_shape_str) > 20: out_shape_str = "..." + out_shape_str[-17:]
             
-            print(f"{class_name:<30} | {in_shape_str:<20} | {out_shape_str:<20} | {params:<8,} | {act_mem:<12.2f}")
+            # print(f"{class_name:<30} | {in_shape_str:<20} | {out_shape_str:<20} | {params:<8,} | {act_mem:<12.2f}")
 
         hooks.append(module.register_forward_hook(hook))
 
@@ -155,72 +156,24 @@ def analyze_memory(model, input_size, batch_size=64):
     print(f"{'='*40}\n")
 
 if __name__ == "__main__":
-    input_shape = (3, 136, 240)
-    mock_space = MockSpace(input_shape)
+    from src.model.sekiro.vae import ResNetSekiroVAE, EfficientCrossSekiroVAE
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # 输入尺寸统一为 128x240 (Sekiro 项目标准)
+    input_size = (3, 128, 240)
+    batch_size = 1 # 推理视角对比
+    
+    print(f"\n{'#'*100}")
+    print(f"{'VAE Architecture Comparison: ResNet vs. EfficientCross (ECR)':^100}")
+    print(f"{'#'*100}\n")
 
-    # print("\n" + "="*40 + " Original Model " + "="*40)
-    # try:
-    #     extractor = SekiroStableExtractor(mock_space)
-    #     analyze_memory(extractor, input_shape, batch_size=32)
-    # except Exception as e:
-    #     print(f"Error analyzing Original Model: {e}")
-
-    # print("\n" + "="*40 + " ResNet-like Model " + "="*40)
-    # try:
-    #     extractor_resnet = ResNetSpatial(mock_space)
-    #     analyze_memory(extractor_resnet, input_shape, batch_size=32)
-    # except Exception as e:
-    #     print(f"Error analyzing ResNet-like Model: {e}")
-
-    # print("\n" + "="*40 + " MobileNetV2-like Model " + "="*40)
-    # try:
-    #     extractor_mobilenet = MobileNetSpatial(mock_space)
-    #     analyze_memory(extractor_mobilenet, input_shape, batch_size=32)
-    # except Exception as e:
-    #     print(f"Error analyzing MobileNetV2-like Model: {e}")
-
-    # print("\n" + "="*40 + " EfficientNet-B0-like Model " + "="*40)
-    # try:
-    #     extractor_efficientnet = EfficientNetSpatial(mock_space)
-    #     analyze_memory(extractor_efficientnet, input_shape, batch_size=32)
-    # except Exception as e:
-    #     print(f"Error analyzing EfficientNet-B0-like Model: {e}")
-
-    print("\n\n" + "#"*40 + " Torchvision Models (No Weights) " + "#"*40)
-
-    # 1. ResNet50
-    print("\n" + "="*40 + " Torchvision ResNet50 (Modified Head) " + "="*40)
-    try:
-        # weights=None 表示不下载预训练权重 (随机初始化)
-        resnet50 = models.resnet50(weights=None)
-        # 修改全连接层以输出 512 维特征 (原始是 1000)
-        resnet50.fc = nn.Linear(resnet50.fc.in_features, 512)
-        analyze_memory(resnet50, input_shape, batch_size=32)
-    except Exception as e:
-        print(f"Error analyzing Torchvision ResNet50: {e}")
-
-    # 2. MobileNetV2
-    print("\n" + "="*40 + " Torchvision MobileNetV2 (Modified Head) " + "="*40)
-    try:
-        mobilenet_v2 = models.mobilenet_v2(weights=None)
-        # 修改分类器最后一层
-        # classifier 是一个 Sequential:
-        # (0): Dropout(p=0.2, inplace=False)
-        # (1): Linear(in_features=1280, out_features=1000, bias=True)
-        mobilenet_v2.classifier[1] = nn.Linear(mobilenet_v2.last_channel, 512)
-        analyze_memory(mobilenet_v2, input_shape, batch_size=32)
-    except Exception as e:
-        print(f"Error analyzing Torchvision MobileNetV2: {e}")
-
-    # 3. EfficientNet-B0
-    print("\n" + "="*40 + " Torchvision EfficientNet-B0 (Modified Head) " + "="*40)
-    try:
-        efficientnet_b0 = models.efficientnet_b0(weights=None)
-        # 修改分类器最后一层
-        # classifier 是一个 Sequential:
-        # (0): Dropout(p=0.2, inplace=True)
-        # (1): Linear(in_features=1280, out_features=1000, bias=True)
-        efficientnet_b0.classifier[1] = nn.Linear(efficientnet_b0.classifier[1].in_features, 512)
-        analyze_memory(efficientnet_b0, input_shape, batch_size=32)
-    except Exception as e:
-        print(f"Error analyzing Torchvision EfficientNet-B0: {e}")
+    # 1. 分析传统的 ResNetSekiroVAE
+    print(f"--- [Stage 1] Analyzing ResNetSekiroVAE (Standard Dense Residuals) ---")
+    res_vae = ResNetSekiroVAE(latent_dim=256).to(device)
+    analyze_memory(res_vae, input_size, batch_size=batch_size)
+    
+    # 2. 分析最新的 EfficientCrossSekiroVAE
+    print(f"\n--- [Stage 2] Analyzing EfficientCrossSekiroVAE (Sparse Evolution + Cross Fusion) ---")
+    ecr_vae = EfficientCrossSekiroVAE(latent_dim=256, num_hiddens=64).to(device)
+    analyze_memory(ecr_vae, input_size, batch_size=batch_size)

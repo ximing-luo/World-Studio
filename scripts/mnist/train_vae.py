@@ -13,7 +13,7 @@ path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.append(path)
 
 from src.datasets.mnist import MNIST_VAE_Dataset
-from src.model.mnist.vae import FCVAE, ConvVAE, ResNetVAE
+from src.model.mnist.vae import FCVAE, ConvVAE, ResNetVAE, BrainResNetMNISTVAE
 from src.model.components.loss import loss_function
 
 def train(epoch, model, train_loader, optimizer, device, beta=1.0):
@@ -37,8 +37,8 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0):
         kld_loss += KLD.item()
         optimizer.step()
         
-        if batch_idx % 100 == 0:
-            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
+        if batch_idx % 20 == 0:
+            print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
                   f'Loss: {loss.item() / len(data):.4f}')
     
@@ -98,12 +98,13 @@ def main():
     
     # 使用 MNIST_VAE_Dataset，angle=45度，预测旋转后的图像
     train_dataset = MNIST_VAE_Dataset(mnist_train, angle=45, angle_per_digit=True)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
     
     # 初始化模型 - 支持 FC, Conv, ResNet 三种架构
-    model = FCVAE(latent_dim=20).to(device)
+    # model = FCVAE(latent_dim=20).to(device)
     # model = ResNetVAE(latent_dim=20).to(device)
     # model = ConvVAE(latent_dim=20).to(device)
+    model = BrainResNetMNISTVAE(latent_dim=20).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     

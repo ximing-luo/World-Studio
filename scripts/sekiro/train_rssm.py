@@ -273,11 +273,11 @@ def eval_task(model, loader, device, beta=1.0, writer=None, epoch=None):
 
 def main():
     # Hyperparameters
-    batch_size = 8
+    batch_size = 4
     learning_rate = 1e-4
     epochs = 30
     beta = 1.0 # KL 权重
-    seq_len = 8
+    seq_len = 4
     stochastic_dim = 64
     deterministic_dim = 512
     action_dim = 13

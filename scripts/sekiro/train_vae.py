@@ -133,8 +133,8 @@ def eval_task(model, loader, device, beta=1.0, writer=None, epoch=None):
 
 def main():
     # Hyperparameters
-    batch_size = 32
-    learning_rate = 1e-3
+    batch_size = 16
+    learning_rate = 5e-4
     epochs = 10
     latent_dim = 512
     beta = 1.0
@@ -159,9 +159,12 @@ def main():
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     
-    # 模型初始化 - 支持 Conv, ResNet 架构
-    model = ResNetSekiroVAE(latent_dim=latent_dim).to(device)
+    # 模型初始化 - 支持 Conv, ResNet, EfficientCross 架构
+    # model = EfficientCrossSekiroVAE(latent_dim=latent_dim, num_evolve_layers=2).to(device)
+    # model = ResNetSekiroVAE(latent_dim=latent_dim).to(device)
     # model = ConvSekiroVAE(latent_dim=latent_dim).to(device)
+    from src.model.sekiro.vae import BrainResNetSekiroVAE
+    model = BrainResNetSekiroVAE(latent_dim=latent_dim).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     for epoch in range(1, epochs + 1):
