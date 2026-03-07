@@ -6,3 +6,6 @@ tests
 log.md
 
 .trae
+
+build_cache
+.clangd

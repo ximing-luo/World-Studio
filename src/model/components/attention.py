@@ -9,11 +9,12 @@ class SEBlock(nn.Module):
     """
     def __init__(self, channels, reduction=4):
         super().__init__()
+        mid_channels = max(32, channels // reduction)
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
+            nn.Linear(channels, mid_channels, bias=False),
             nn.SiLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Linear(mid_channels, channels, bias=False),
             nn.Sigmoid()
         )
 

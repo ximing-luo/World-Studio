@@ -55,9 +55,18 @@ World-Studio/
 │   │   │   └── resnet.py     # ResNet 残差块 (Basic/BottleNeck/ResBlock)
 │   │   ├── ecr/              # 高效演化层 (ECR)
 │   │   │   ├── ecr.py        # 核心逻辑
-│   │   │   └── tools/        # ECR 专项性能分析
-│   │   │       ├── prof_block.py   # 模块级性能诊断
-│   │   │       └── prof_fusion.py  # 融合策略对比
+│   │   │   ├── cuda/         # CUDA 算子实现
+│   │   │   │   ├── evolution_v1_kernel.cu  # 单层演化内核 (极致优化)
+│   │   │   │   ├── evolution_v8_kernel.cu  # 8层演化内核
+│   │   │   │   ├── evolution_v1_bind.cpp   # v1 接口绑定
+│   │   │   │   ├── evolution_v8_bind.cpp   # v8 接口绑定
+│   │   │   │   ├── utils_compile.py       # 算子编译验证工具
+│   │   │   │   └── utils_speed.py      # 算子性能基准测试
+│   │   │   └── utils/        # ECR 专项性能分析
+│   │   │       ├── prof_block.py   # 模块级性能诊断 (显存/耗时/算力)
+│   │   │       ├── prof_fusion.py  # 融合策略对比 (理论算力)
+│   │   │       ├── prof_layer.py   # 逐层性能分析 (显存/耗时)
+│   │   │       └── prof_flops.py   # 逐层算力分析 (FLOPs 统计)
 │   │   ├── gan/              # 判别器组件
 │   │   │   └── discriminator.py
 │   │   └── world/            # 世界模型实现 (基础架构)
