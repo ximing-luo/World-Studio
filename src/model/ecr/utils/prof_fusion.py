@@ -1,82 +1,107 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import time
 
-def calculate_conv2d_flops(c_in, c_out, kernel_size=1, groups=1, h=64, w=64):
-    """
-    计算 Conv2d 的 FLOPs (2 * MACs)
-    """
-    # 每组内的计算量 = (输入通道/组数) * (输出通道/组数) * 卷积核大小 * 特征图大小
-    # 总计算量 = 每组计算量 * 组数
-    # 化简后: (c_in * c_out / groups) * kernel_size^2 * h * w
-    macs = (c_in * c_out // groups) * (kernel_size**2) * h * w
-    flops = 2 * macs
-    return flops
+class CrossScholarFusion(nn.Module):
+    def __init__(self, in_channels, out_channels, latent_dim=None):
+        super().__init__()
+        if latent_dim is None:
+            latent_dim = in_channels // 16
+        if latent_dim < 8:
+            latent_dim = 64
+        self.latent_dim = latent_dim
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        w_k = torch.randn(latent_dim, in_channels, 1, 1) * (latent_dim ** -0.5)
+        self.W_K = nn.Parameter(w_k)
+        
+        w_q = torch.randn(out_channels, latent_dim, 1, 1) * (latent_dim ** -0.5)
+        self.W_Q = nn.Parameter(w_q)
 
-def analyze_fusion_strategies():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Running Analysis on {device}\n")
+    def forward(self, x):
+        # 移除 to(memory_format) 转换，因为它是一个同步操作，开销极大
+        # 如果输入已经是 Channels Last，则直接运行
+        x = F.conv2d(x, self.W_K)
+        x = F.conv2d(x, self.W_Q)
+        return x
+
+def check_memory_format(x):
+    if x.is_contiguous(memory_format=torch.channels_last):
+        return "Channels Last (NHWC)"
+    elif x.is_contiguous():
+        return "Contiguous (NCHW)"
+    else:
+        return "Unknown/Other"
+
+def benchmark_ecr_performance():
+    if not torch.cuda.is_available():
+        print("CUDA not available.")
+        return
+
+    device = torch.device('cuda')
+    torch.backends.cudnn.benchmark = True
     
-    H, W = 64, 64
-    C_BASE = 128
-    C_MID = 512
-    print(f"Input Shape: (B, {C_MID}, {H}, {W}) [Mid-Channels case]\n")
+    # 测试配置
+    B, C, H, W = 64, 512, 32, 32
+    L = 64 # Scholar Fusion 潜空间维度
     
-    # --- 策略 A: 标准 Dense 1x1 ---
-    print("="*60)
-    print(f"Strategy A: Standard Dense 1x1 Fusion ({C_MID} -> {C_MID})")
-    print("="*60)
-    flops_a = calculate_conv2d_flops(C_MID, C_MID, groups=1, h=H, w=W)
-    print(f"Layer: Conv2d({C_MID}, {C_MID}, k=1, groups=1) | FLOPs: {flops_a/1e6:.2f} M")
-    print(f"Total FLOPs (A): {flops_a/1e6:.2f} M")
-    print("-" * 60)
+    print("\n" + "="*80)
+    print(f"FINAL PERFORMANCE COMPARISON | Input: ({B}, {C}, {H}, {W})")
+    print("="*80)
+
+    # 1. 准备模型
+    model_dense = nn.Conv2d(C, C, 1, bias=False).to(device)
+    model_scholar = CrossScholarFusion(C, C, latent_dim=L).to(device)
     
-    # --- 策略 B: 漏斗架构 (Funnel Fusion) ---
-    print("\n" + "="*60)
-    print("Strategy B: Funnel Fusion (Shrink128 -> Shrink32 -> Think -> Expand)")
-    print("="*60)
-    # 512 -> 128 (G128)
-    f1 = calculate_conv2d_flops(C_MID, 128, groups=128, h=H, w=W)
-    print(f"Step 1 (G128): Conv2d({C_MID}, 128, k=1, groups=128) | FLOPs: {f1/1e6:.2f} M")
-    # 128 -> 32 (G32)
-    f2 = calculate_conv2d_flops(128, 32, groups=32, h=H, w=W)
-    print(f"Step 2 (G32):  Conv2d(128, 32, k=1, groups=32)  | FLOPs: {f2/1e6:.2f} M")
-    # 32 -> 128 (Dense)
-    f3 = calculate_conv2d_flops(32, 128, groups=1, h=H, w=W)
-    print(f"Step 3 (Think): Conv2d(32, 128, k=1, groups=1)  | FLOPs: {f3/1e6:.2f} M")
-    # 128 -> 512 (G128)
-    f4 = calculate_conv2d_flops(128, C_MID, groups=128, h=H, w=W)
-    print(f"Step 4 (Expand):Conv2d(128, {C_MID}, k=1, groups=128)| FLOPs: {f4/1e6:.2f} M")
+    # 2. 准备数据
+    x_nchw = torch.randn(B, C, H, W, device=device)
+    x_nhwc = x_nchw.to(memory_format=torch.channels_last)
     
-    total_b = f1 + f2 + f3 + f4
-    print("-" * 60)
-    print(f"Total FLOPs (B): {total_b/1e6:.2f} M")
+    print(f"Testing with NCHW Input:")
+    # 预热
+    for _ in range(20):
+        _ = model_dense(x_nchw)
+        _ = model_scholar(x_nchw)
+    torch.cuda.synchronize()
+
+    def get_time(f, inp, iters=20):
+        torch.cuda.synchronize()
+        start = time.time()
+        for _ in range(iters):
+            _ = f(inp)
+        torch.cuda.synchronize()
+        return (time.time() - start) / iters * 1000, None
+
+    t_dense_nchw, _ = get_time(model_dense, x_nchw)
+    out_dense_nchw = model_dense(x_nchw)
+    t_scholar_nchw, _ = get_time(model_scholar, x_nchw)
+    out_scholar_nchw = model_scholar(x_nchw)
+
+    print(f"Standard 1x1: {t_dense_nchw:>12.4f} ms | {check_memory_format(out_dense_nchw)}")
+    print(f"Scholar 1x1:  {t_scholar_nchw:>12.4f} ms | {check_memory_format(out_scholar_nchw)}")
     
-    # --- 策略 C: 静态学者融合 (Static Scholar Fusion) ---
-    print("\n" + "="*60)
-    print(f"Strategy C: Static Scholar Fusion ({C_MID} -> 16 -> {C_MID})")
-    print("="*60)
-    # 1. 静态归类 (512 -> 16, Dense)
-    f_c1 = calculate_conv2d_flops(C_MID, 16, groups=1, h=H, w=W)
-    print(f"Step 1 (Classify): Conv2d({C_MID}, 16, k=1, groups=1) | FLOPs: {f_c1/1e6:.2f} M")
-    # 2. 个性化检索 (16 -> 512, Dense)
-    f_c2 = calculate_conv2d_flops(16, C_MID, groups=1, h=H, w=W)
-    print(f"Step 2 (Retrieve): Conv2d(16, {C_MID}, k=1, groups=1) | FLOPs: {f_c2/1e6:.2f} M")
-    
-    total_c = f_c1 + f_c2
-    print("-" * 60)
-    print(f"Total FLOPs (C): {total_c/1e6:.2f} M")
-    
-    # --- 对比 ---
-    print("\n" + "="*60)
-    print("FINAL COMPARISON (Mid-Channels: 512)")
-    print("="*60)
-    print(f"Strategy A (Dense 1x1):    {flops_a/1e6:>10.2f} M")
-    print(f"Strategy B (Funnel):       {total_b/1e6:>10.2f} M")
-    print(f"Strategy C (Scholar 16):   {total_c/1e6:>10.2f} M")
-    print("-" * 60)
-    print(f"Gain (A vs C): {flops_a/total_c:.2f}x Faster!")
-    print(f"Efficiency: C is {total_b/total_c:.2f}x the compute of B (but no random grouping)")
-    print("="*60)
+    print(f"\nTesting with NHWC Input:")
+    # # 预处理模型权重为 NHWC
+    # model_dense_nhwc = nn.Conv2d(C, C, 1, bias=False).to(device).to(memory_format=torch.channels_last)
+    # # 预热
+    # for _ in range(20):
+    #     _ = model_dense_nhwc(x_nhwc)
+    #     _ = model_scholar(x_nhwc)
+    # torch.cuda.synchronize()
+
+    # t_dense_nhwc, _ = get_time(model_dense_nhwc, x_nhwc)
+    # out_dense_nhwc = model_dense_nhwc(x_nhwc)
+    # t_scholar_nhwc, _ = get_time(model_scholar, x_nhwc)
+    # out_scholar_nhwc = model_scholar(x_nhwc)
+
+    # print(f"Standard 1x1: {t_dense_nhwc:>12.4f} ms | {check_memory_format(out_dense_nhwc)}")
+    # print(f"Scholar 1x1:  {t_scholar_nhwc:>12.4f} ms | {check_memory_format(out_scholar_nhwc)}")
+
+    # print("-" * 80)
+    # print(f"Best Speedup (NHWC): {t_dense_nhwc / t_scholar_nhwc:.2f}x")
+    # print("="*80 + "\n")
 
 if __name__ == "__main__":
-    analyze_fusion_strategies()
+    benchmark_ecr_performance()

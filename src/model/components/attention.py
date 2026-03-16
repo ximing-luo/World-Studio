@@ -22,7 +22,9 @@ class SEBlock(nn.Module):
         b, c, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
-        return x * y.expand_as(x)
+        # 使用原地乘法 (In-place multiplication)
+        # 既能节省 64MB 临时显存，又能尝试保持内存布局连续性
+        return x.mul_(y)
 
 class AttentionPooling(nn.Module):
     """

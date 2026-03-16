@@ -11,6 +11,9 @@
   - **VQ-VAE (矢量量化 VAE)**: 离散隐空间表示。支持 **FC**、**Conv**、**ResNet** 三种骨干网络。
   - **JEPA (联合嵌入预测架构)**: 基于表征的预测模型。支持 **FC**、**Conv**、**ResNet** 三种骨干网络。
   - **RSSM (循环状态空间模型)**: 结合 RNN 与状态空间建模。支持 **FC**、**Conv**、**ResNet** 三种骨干网络。
+- **高性能算子**:
+  - **高效演化层 (ECR)**: 融合了深度卷积 (Depthwise Conv) 与残差连接的 CUDA 算子，支持交叉学者融合 (Cross Scholar Fusion) 机制。
+  - **CUDA 归一化 (Norm)**: 针对 2D 视觉张量优化的 RMSNorm2d 和 LayerNorm2d 融合内核。
 - **任务模式**:
   - **MNIST 旋转预测**: 输入当前帧 (t)，预测旋转后的下一帧 (t+1)。支持固定角度或随机角度旋转。
   - **Sekiro (只狼) 画面重建**: 输入只狼游戏的原始画面 `(3, 128, 240)`。使用 **卷积 VAE (ConvVAE)** 模型，通过局部感受野和权重共享机制，显著降低参数量，从而能够轻松处理全分辨率彩色图像。
@@ -52,16 +55,20 @@ World-Studio/
 │   │   │   ├── attention.py  # 注意力机制
 │   │   │   ├── focus.py      # 空间专注层 (Focus/UnFocus)
 │   │   │   ├── loss.py       # 损失函数 (含感知损失)
-│   │   │   └── resnet.py     # ResNet 残差块 (Basic/BottleNeck/ResBlock)
+│   │   │   ├── norm.py       # 归一化层 (RMSNorm2d/LayerNorm2d)
+│   │   │   ├── resnet.py     # ResNet 残差块 (Basic/BottleNeck/ResBlock)
+│   │   │   └── cuda_norm/    # CUDA 归一化算子
+│   │   │       ├── norm_bind.cpp
+│   │   │       ├── norm_kernel.cu
+│   │   │       └── ops_norm.py
 │   │   ├── ecr/              # 高效演化层 (ECR)
-│   │   │   ├── ecr.py        # 核心逻辑
-│   │   │   ├── cuda/         # CUDA 算子实现
-│   │   │   │   ├── evolution_v1_kernel.cu  # 单层演化内核 (极致优化)
-│   │   │   │   ├── evolution_v8_kernel.cu  # 8层演化内核
-│   │   │   │   ├── evolution_v1_bind.cpp   # v1 接口绑定
-│   │   │   │   ├── evolution_v8_bind.cpp   # v8 接口绑定
-│   │   │   │   ├── utils_compile.py       # 算子编译验证工具
-│   │   │   │   └── utils_speed.py      # 算子性能基准测试
+│   │   │   ├── ecr.py        # 核心逻辑 (CrossScholarFusion/EfficientCrossResBlock)
+│   │   │   ├── cuda_evolution/ # CUDA 演化算子实现
+│   │   │   │   ├── evolution_bind.cpp   # 接口绑定
+│   │   │   │   ├── evolution_kernel.cu # 演化内核 (极致优化)
+│   │   │   │   ├── ops_evolution.py    # Python 算子封装
+│   │   │   │   ├── utils_compile.py    # 编译验证工具
+│   │   │   │   └── utils_speed.py      # 性能测试工具
 │   │   │   └── utils/        # ECR 专项性能分析
 │   │   │       ├── prof_block.py   # 模块级性能诊断 (显存/耗时/算力)
 │   │   │       ├── prof_fusion.py  # 融合策略对比 (理论算力)
@@ -175,6 +182,7 @@ action_dim = 4      # 动作维度
 1. **模块化**: 所有世界模型继承自基类 (`BaseVAE`, `BaseJEPA`, `BaseRSSM`, `BaseVQVAE`)
 2. **组件复用**: 使用 `backbone/` 和 `components/` 中的通用组件
 3. **配置分离**: 超参数通过 `configs/` 中的 dataclass 管理
+4. **算子优化**: 核心计算密集型任务 (如 ECR, Norm) 优先使用 CUDA 融合算子实现
 
 ### 测试实践
 
@@ -207,6 +215,14 @@ train_loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=0)
 - 使用 `PerceptualLoss` (基于 SqueezeNet) 替代 VGG 感知损失
 - 调整 `batch_size` 和 `latent_dim` 平衡显存占用
 - 使用梯度累积模拟大批次训练
+
+### 清理项目缓存 (Windows)
+
+若遇到模块导入异常或需要彻底清理 Python 编译缓存，可在 PowerShell 中运行：
+
+```powershell
+Get-ChildItem -Path . -Filter "__pycache__" -Recurse | Remove-Item -Force -Recurse
+```
 
 ## 输出说明
 

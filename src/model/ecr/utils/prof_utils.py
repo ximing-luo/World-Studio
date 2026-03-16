@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from collections import OrderedDict
 from src.model.ecr.ecr import CrossScholarFusion
+from src.model.ecr.cuda_evolution.ops_evolution import EvolutionLayer
 
 def get_conv2d_flops(module, input_shape):
     """计算 Conv2d 的 FLOPs (2 * MACs)"""
@@ -31,7 +32,8 @@ class ManualFlopCounter:
     def _get_hook(self, name):
         def hook(module, input, output):
             is_fusion = isinstance(module, CrossScholarFusion)
-            if is_fusion or len(list(module.children())) == 0:
+            is_evolution = isinstance(module, EvolutionLayer)
+            if is_fusion or is_evolution or len(list(module.children())) == 0:
                 input_data = input[0]
                 input_shape = input_data.shape
                 
@@ -45,6 +47,10 @@ class ManualFlopCounter:
                     f1 = 2 * input_shape[2] * input_shape[3] * module.latent_dim * module.in_channels
                     f2 = 2 * input_shape[2] * input_shape[3] * module.out_channels * module.latent_dim
                     flops = f1 + f2
+                elif is_evolution:
+                    # EvolutionLayer: 1 层 3x3 DW 卷积 (融合算子内部)
+                    # FLOPs = 1层 * 2 (MACs to FLOPs) * (3*3 kernel) * channels * (H * W)
+                    flops = 1 * 2 * 9 * module.channels * input_shape[2] * input_shape[3]
                 
                 if flops > 0:
                     if name not in self.layer_stats:
@@ -54,7 +60,7 @@ class ManualFlopCounter:
 
     def register_hooks(self):
         for name, module in self.model.named_modules():
-            if isinstance(module, CrossScholarFusion) or len(list(module.children())) == 0:
+            if isinstance(module, (CrossScholarFusion, EvolutionLayer)) or len(list(module.children())) == 0:
                 self.hooks.append(module.register_forward_hook(self._get_hook(name)))
 
     def remove_hooks(self):

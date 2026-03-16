@@ -13,8 +13,12 @@ path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.append(path)
 
 from src.datasets.mnist import MNIST_VAE_Dataset
-from src.model.mnist.vae import FCVAE, ConvVAE, ResNetVAE, BrainResNetMNISTVAE
-from src.model.components.loss import loss_function
+from src.world.vision.mnist import MNISTResNet
+from src.world.projection.projection import LinearProjection
+from src.world.latents.vae import VAELatent
+from src.world.dream.vae import StaticReconstruction
+from src.utils.loss import loss_function
+import torch.nn as nn
 
 def train(epoch, model, train_loader, optimizer, device, beta=1.0):
     model.train()
@@ -26,10 +30,15 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0):
         data = data.to(device)
         target = target.to(device)
         optimizer.zero_grad()
-        recon_batch, mu, logvar = model(data)
+        
+        # 框架模型输出: 重建图像, KL 损失 (mean), 原始 tokens (用于 mu/logvar)
+        recon_batch, latent_loss, tokens = model(data)
+        
+        # 拆分 mu 和 logvar (用于原脚本计算损失，保持与原脚本逻辑一致，使用 sum 模式损失)
+        mu, logvar = torch.chunk(tokens, 2, dim=-1)
         
         # 计算损失：重建目标变为旋转后的图
-        loss, BCE, KLD = loss_function(recon_batch, target, mu, logvar, beta)
+        loss, BCE, KLD, _ = loss_function(recon_batch, target, mu, logvar, beta)
         loss.backward()
         
         train_loss += loss.item()
@@ -73,7 +82,6 @@ def visualize_reconstruction(model, loader, device, epoch):
             if i == 0: axes[1, i].set_title('Target')
             
             # Reconstruction
-            # MLP VAE returns (B, 784), need to reshape to (28, 28)
             img_recon = recon[i].cpu().view(28, 28).numpy()
             axes[2, i].imshow(img_recon, cmap='gray')
             axes[2, i].axis('off')
@@ -100,11 +108,14 @@ def main():
     train_dataset = MNIST_VAE_Dataset(mnist_train, angle=45, angle_per_digit=True)
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
     
-    # 初始化模型 - 支持 FC, Conv, ResNet 三种架构
-    # model = FCVAE(latent_dim=20).to(device)
-    # model = ResNetVAE(latent_dim=20).to(device)
-    # model = ConvVAE(latent_dim=20).to(device)
-    model = BrainResNetMNISTVAE(latent_dim=20).to(device)
+    # 框架化构建模型
+    latent_dim = 20
+    vision = MNISTResNet(in_channels=1)
+    projection = LinearProjection(in_channels=128, height=7, width=7, token_dim=latent_dim, is_vae=True)
+    latent = VAELatent()
+    predictor = nn.Identity() # 基础 VAE 无需额外预测器
+    
+    model = StaticReconstruction(vision, projection, latent, predictor).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     

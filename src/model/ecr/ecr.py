@@ -2,12 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from src.model.components.attention import SEBlock
-from src.model.ecr.norm import RMSNorm2d, LayerNorm2d
-from .triton.triton import TritonECR
+from src.model.components.norm import RMSNorm2d, LayerNorm2d
+from src.model.ecr.cuda_evolution.ops_evolution import EvolutionLayer
 
 class CrossScholarFusion(nn.Module):
     """
     交叉学者融合 (Cross Scholar Fusion)
+    适合高通道低分辨率
     
     设计哲学:
     1. 语义投影 (W_K): 大小 32 x C，代表 32 种预定义的“语义主题”。
@@ -19,25 +20,27 @@ class CrossScholarFusion(nn.Module):
         super().__init__()
         if latent_dim is None:
             latent_dim = in_channels // 16
-        if latent_dim < 32:
-            latent_dim = 32
+        if latent_dim < 64:
+            latent_dim = 64
         self.latent_dim = latent_dim
         self.in_channels = in_channels
         self.out_channels = out_channels
         
         # W_K: latent_dim x in_channels (归一化到学者空间)
-        self.W_K = nn.Parameter(torch.randn(latent_dim, in_channels) * (latent_dim ** -0.5))
+        # 优化：预先转换为 1x1 卷积核形状
+        w_k = torch.randn(latent_dim, in_channels, 1, 1) * (latent_dim ** -0.5)
+        self.W_K = nn.Parameter(w_k)
+        
         # W_Q: out_channels x latent_dim (从学者空间还原)
-        self.W_Q = nn.Parameter(torch.randn(out_channels, latent_dim) * (latent_dim ** -0.5))
+        w_q = torch.randn(out_channels, latent_dim, 1, 1) * (latent_dim ** -0.5)
+        self.W_Q = nn.Parameter(w_q)
 
     def forward(self, x):
         # 1. 投影到潜空间 (分类): (B, latent_dim, H, W) = W_K @ X
-        # 注意：这里的 C 必须等于 self.in_channels，否则 W_K 形状不匹配
-        x = F.conv2d(x, self.W_K.view(self.latent_dim, self.in_channels, 1, 1))
+        x = F.conv2d(x, self.W_K)
         
-        # 3. 从潜空间检索并还原: (B, out_channels, H, W) = W_Q @ 潜空间
-        # 注意：这里输出的是 out_channels，而不是输入的 C
-        x = F.conv2d(x, self.W_Q.view(self.out_channels, self.latent_dim, 1, 1))
+        # 2. 从潜空间检索并还原: (B, out_channels, H, W) = W_Q @ 潜空间
+        x = F.conv2d(x, self.W_Q)
         
         return x
 
@@ -71,39 +74,35 @@ class EfficientCrossResBlock(nn.Module):
     - 架构演进: 将传统的 Dense 卷积残差结构转变为“稀疏演化 + 瓶颈融合”的高效范式。
     - 显存优化: 支持梯度检查点 (Gradient Checkpointing)，在大规模深度演化时可大幅降低训练显存。
     """
-    def __init__(self, in_channels, out_channels, num_evolve_layers=3, expansion=4, stride=1, use_checkpoint=False):
+    def __init__(self, in_channels, out_channels, expansion=0.5, stride=1, num_evolve_layers=4):
         super().__init__()
-        self.use_checkpoint = use_checkpoint
-        self.stride = stride
-        
         # mid_channels 为最终的输出通道数，由 expansion 决定
-        mid_channels = in_channels * expansion
+        mid_channels = int(in_channels * expansion)
 
         # 1. 分组膨胀与下采样 (Expansion & Downsample)
         # 用极低成本的分组卷积实现通道暴涨，物理隔离通道
+        group = int(min(in_channels, mid_channels))
         self.expand = nn.Sequential(
             LayerNorm2d(in_channels),
-            nn.Conv2d(in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, groups=in_channels, bias=False)
+            nn.Conv2d(in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, groups=group, bias=False)
         )
-        
         self.seblock = SEBlock(mid_channels, reduction=4)
-        self.evolution = TritonECR(mid_channels, num_layers=num_evolve_layers)
+        self.evolution = nn.Sequential(*[EvolutionLayer(mid_channels) for _ in range(num_evolve_layers)])
         self.fusion = CrossScholarFusion(mid_channels, out_channels)
 
-        self.norm = LayerNorm2d(in_channels) if stride != 1 else nn.Identity()
-        
-        # 0. Shortcut 路径 (保证梯度回传的黄金通道)
-        self.shortcut = nn.Identity()
+        self.shortcut = None
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.AvgPool2d(kernel_size=stride, stride=stride, ceil_mode=True) if stride > 1 else nn.Identity(),
                 CrossScholarFusion(in_channels, out_channels)
             )
+        self.norm = LayerNorm2d(in_channels) if stride != 1 else None
 
     def forward(self, x):
-        x = self.norm(x)
-        # 0. 黄金通道 (Shortcut)
-        identity = self.shortcut(x)
+        if self.norm is not None:
+            x = self.norm(x)
+        identity = self.shortcut(x) if self.shortcut is not None else x
+        
         # 1. 膨胀下采样 (建立高维特征空间)
         x = self.expand(x)
         x = self.seblock(x)
@@ -111,6 +110,5 @@ class EfficientCrossResBlock(nn.Module):
         x = self.evolution(x)
         # 3. 交叉注意力融合 (全局语义集成)
         x = self.fusion(x)
-        # 4. 最终集成: 演化结果 + 原始映射
         return x + identity
 

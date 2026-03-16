@@ -10,11 +10,12 @@ from collections import OrderedDict
 root_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 sys.path.append(root_path)
 
-from src.model.components.resnet import ResBlock
+from src.model.components.resnet import BottleNeck
 from src.model.ecr.ecr import (
     CrossScholarFusion, EfficientEvolutionLayer, EfficientCrossResBlock
 )
-from .prof_utils import ManualFlopCounter
+from src.model.ecr.cuda_evolution.ops_evolution import EvolutionLayer
+from src.model.ecr.utils.prof_utils import ManualFlopCounter
 
 class LayerMemoryTracker:
     """
@@ -48,7 +49,8 @@ class LayerMemoryTracker:
         for name, module in self.model.named_modules():
             # 我们只追踪关键模块或叶子节点
             is_fusion = isinstance(module, CrossScholarFusion)
-            if is_fusion or len(list(module.children())) == 0:
+            is_evolution = isinstance(module, EvolutionLayer)
+            if is_fusion or is_evolution or len(list(module.children())) == 0:
                 self.stats[name] = {'mem_before': 0, 'mem_after': 0, 'mem_peak': 0, 'type': module.__class__.__name__}
                 self.hooks.append(module.register_forward_pre_hook(self._get_pre_hook(name)))
                 self.hooks.append(module.register_forward_hook(self._get_hook(name)))
@@ -202,28 +204,22 @@ def run_full_comparison():
         return
         
     BATCH_SIZE = 64
-    CHANNELS = 64
-    H, W = 32, 60
-    # 核心修复：必须开启 requires_grad，Checkpoint 才会生效
+    CHANNELS = 256 # 高通道
+    H, W = 16, 16  # 低分辨率
+    # 核心修复：必须开启 requires_grad
     input_data = torch.randn(BATCH_SIZE, CHANNELS, H, W, device=device, requires_grad=True)
 
-    # 1. ResBlock
-    res_block = ResBlock(CHANNELS, CHANNELS, stride=1).to(device)
-    res_results = analyze_block("ResBlock (Baseline)", res_block, input_data, is_training=True)
+    # 1. BottleNeck (通道数不变)
+    bottleneck_block = BottleNeck(CHANNELS, CHANNELS, stride=1).to(device)
+    bottleneck_results = analyze_block("BottleNeck (Baseline)", bottleneck_block, input_data, is_training=True)
     
     # 清理缓存
     torch.cuda.empty_cache()
 
-    # 2. ECR L5 Normal
-    ecr_block = EfficientCrossResBlock(CHANNELS, CHANNELS, num_evolve_layers=5, expansion=2, use_checkpoint=False).to(device)
-    ecr_results = analyze_block("ECR L5 (Normal Mode)", ecr_block, input_data, is_training=True)
+    # 2. ECR V8 Normal (默认 expansion=4)
+    ecr_block = EfficientCrossResBlock(CHANNELS, CHANNELS, expansion=4, stride=1).to(device)
+    ecr_results = analyze_block("ECR V8 (Normal Mode)", ecr_block, input_data, is_training=True)
     
-    torch.cuda.empty_cache()
-
-    # 3. ECR L5 Gradient Checkpointing
-    ecr_block_cp = EfficientCrossResBlock(CHANNELS, CHANNELS, num_evolve_layers=5, expansion=2, use_checkpoint=True).to(device)
-    ecr_cp_results = analyze_block("ECR L5 (Checkpoint Mode)", ecr_block_cp, input_data, is_training=True)
-
     print(f"\n{'='*120}")
     print(f"{'FINAL PERFORMANCE REPORT':^120}")
     print(f"{'='*120}")
@@ -233,12 +229,9 @@ def run_full_comparison():
     def print_row(name, res):
         print(f"{name:<30} | {res['flops']/1e9:<15.4f} | {res['mem']:<20.2f} | {res['retained']:<20.2f}")
 
-    print_row("ResBlock", res_results)
-    print_row("ECR L5 (Normal)", ecr_results)
-    print_row("ECR L5 (Checkpoint)", ecr_cp_results)
+    print_row("BottleNeck", bottleneck_results)
+    print_row("ECR V8 (Normal)", ecr_results)
     print(f"{'='*120}")
-    print(f"CONCLUSION: Compare 'Retained Act' of Normal vs Checkpoint. Checkpoint should be ~1/3 of Normal.")
-    print(f"{'='*120}\n")
 
 if __name__ == "__main__":
     run_full_comparison()

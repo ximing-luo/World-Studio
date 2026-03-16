@@ -59,6 +59,8 @@ class CudaOpTester:
             # 1. 执行 CUDA 版本
             cuda_fn = getattr(self.module, cuda_fn_name)
             output_cuda = cuda_fn(*cuda_args)
+            if isinstance(output_cuda, (tuple, list)):
+                output_cuda = output_cuda[0]
             
             # 2. 执行 PyTorch 版本 (参考实现)
             output_ref = ref_fn(*cuda_args)
@@ -78,41 +80,10 @@ class CudaOpTester:
 # 算子测试用例定义
 # =============================================================================
 
-# --- 1. Evolution8 (8层连续演化) ---
+# --- 1. Evolution (优化单层演化) ---
 
-def pytorch_evolution8_forward(input_tensor, weights, biases):
-    """8层连续演化的 PyTorch 参考实现"""
-    x = input_tensor
-    C = input_tensor.size(1)
-    for i in range(8):
-        # 演化逻辑：y = x + conv(relu(x))
-        w = weights[:, i, :, :].unsqueeze(1) # [C, 1, 3, 3]
-        b = biases[:, i]
-        activated_x = F.relu(x)
-        conv_res = F.conv2d(activated_x, w, bias=b, padding=1, groups=C)
-        x = x + conv_res
-    return x
-
-def test_evolution8():
-    tester = CudaOpTester(
-        name="evolution8",
-        sources=["evolution_v8_bind.cpp", "evolution_v8_kernel.cu"]
-    )
-    if not tester.compile(): return False
-    
-    # 构造输入 (B, C, H, W)
-    B, C, H, W = 2, 16, 64, 64
-    input_tensor = torch.randn(B, C, H, W)
-    # weights: [C, 8, 3, 3], biases: [C, 8]
-    weights = torch.randn(C, 8, 3, 3) * 0.02
-    biases = torch.randn(C, 8) * 0.01
-    
-    return tester.verify([input_tensor, weights, biases], pytorch_evolution8_forward)
-
-# --- 2. EvolutionPref (极致优化单层演化) ---
-
-def pytorch_evolution_pref_forward(input_tensor, weights, biases):
-    """极致优化版演化层的 PyTorch 参考实现"""
+def pytorch_evolution_forward(input_tensor, weights, biases):
+    """优化版演化层的 PyTorch 参考实现"""
     C = input_tensor.size(1)
     # weights: [C, 3, 3] -> [C, 1, 3, 3] for depthwise conv
     w = weights.view(C, 1, 3, 3)
@@ -120,10 +91,10 @@ def pytorch_evolution_pref_forward(input_tensor, weights, biases):
     conv_res = F.conv2d(activated_x, w, bias=biases, padding=1, groups=C)
     return input_tensor + conv_res
 
-def test_evolution_pref():
+def test_evolution():
     tester = CudaOpTester(
-        name="evolution_pref",
-        sources=["evolution_v1_bind.cpp", "evolution_v1_kernel.cu"]
+        name="evolution",
+        sources=["evolution_bind.cpp", "evolution_kernel.cu"]
     )
     if not tester.compile(): return False
     
@@ -134,7 +105,34 @@ def test_evolution_pref():
     weights = torch.randn(C, 3, 3) * 0.02
     biases = torch.randn(C) * 0.01
     
-    return tester.verify([input_tensor, weights, biases], pytorch_evolution_pref_forward)
+    return tester.verify([input_tensor, weights, biases], pytorch_evolution_forward)
+
+# --- 2. CrossScholarFusion (跨学者融合) ---
+
+def pytorch_cross_scholar_fusion_forward(x, w_k, w_q):
+    """CrossScholarFusion 的 PyTorch 参考实现 (双 1x1 卷积链)"""
+    L, C_in = w_k.shape
+    C_out, _ = w_q.shape
+    # 第一步: 投影到潜空间
+    latent = F.conv2d(x, w_k.view(L, C_in, 1, 1))
+    # 第二步: 从潜空间还原
+    y = F.conv2d(latent, w_q.view(C_out, L, 1, 1))
+    return y
+
+def test_cross_scholar_fusion():
+    tester = CudaOpTester(
+        name="cross_fusion",
+        sources=["cross_fusion_bind.cpp", "cross_fusion_kernel.cu"]
+    )
+    if not tester.compile(): return False
+    
+    # 构造输入
+    B, C_in, C_out, L, H, W = 2, 64, 128, 32, 32, 32
+    x = torch.randn(B, C_in, H, W)
+    w_k = torch.randn(L, C_in) * (L ** -0.5)
+    w_q = torch.randn(C_out, L) * (L ** -0.5)
+    
+    return tester.verify([x, w_k, w_q], pytorch_cross_scholar_fusion_forward)
 
 # =============================================================================
 # 主程序入口
@@ -151,11 +149,11 @@ if __name__ == "__main__":
         # 记录各算子测试结果
         summary = []
         
-        # 运行 Evolution8 测试
-        summary.append(("Evolution8", test_evolution8()))
+        # 运行 Evolution 测试
+        summary.append(("Evolution", test_evolution()))
         
-        # 运行 EvolutionPref 测试
-        summary.append(("EvolutionPref", test_evolution_pref()))
+        # 运行 CrossScholarFusion 测试
+        summary.append(("CrossScholarFusion", test_cross_scholar_fusion()))
         
         # 打印最终汇总报告
         print("\n" + "="*60)
