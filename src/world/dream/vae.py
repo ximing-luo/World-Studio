@@ -5,7 +5,7 @@ class StaticReconstruction(nn.Module):
     静态重建框架 (Static Reconstruction Framework)。
     适用于纯 VAE 或 VQ-VAE 的训练逻辑：Image -> Feature -> Tokens -> Latent -> Image。
     """
-    def __init__(self, vision, projection, latent, predictor):
+    def __init__(self, vision, projection, latent, predictor = nn.Identity()):
         super().__init__()
         self.vision = vision
         self.projection = projection

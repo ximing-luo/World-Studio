@@ -1,238 +1,171 @@
-# World Model Studio
+# CLAUDE.md
 
-## 项目概述
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-这是一个基于 **PyTorch** 的深度学习项目，实现了多种 **世界模型 (World Model)** 架构。该项目旨在学习理解和预测环境状态的动态变化。
+## Overview
 
-### 核心功能
+World Model Studio is a PyTorch-based deep learning research framework focused on building **world models** that learn internal representations of environment dynamics and predict future states. The project implements multiple architectures (VAE, VQ-VAE, JEPA, RSSM) with interchangeable backbone networks (FC, Conv, ResNet) and features a modular design for vision, projection, latent constraints, and prediction components.
 
-- **多种模型架构**:
-  - **VAE (变分自编码器)**: 通用编码器 - 解码器架构。支持 **FC** (全连接)、**Conv** (卷积)、**ResNet** (残差) 三种骨干网络。
-  - **VQ-VAE (矢量量化 VAE)**: 离散隐空间表示。支持 **FC**、**Conv**、**ResNet** 三种骨干网络。
-  - **JEPA (联合嵌入预测架构)**: 基于表征的预测模型。支持 **FC**、**Conv**、**ResNet** 三种骨干网络。
-  - **RSSM (循环状态空间模型)**: 结合 RNN 与状态空间建模。支持 **FC**、**Conv**、**ResNet** 三种骨干网络。
-- **高性能算子**:
-  - **高效演化层 (ECR)**: 融合了深度卷积 (Depthwise Conv) 与残差连接的 CUDA 算子，支持交叉学者融合 (Cross Scholar Fusion) 机制。
-  - **CUDA 归一化 (Norm)**: 针对 2D 视觉张量优化的 RMSNorm2d 和 LayerNorm2d 融合内核。
-- **任务模式**:
-  - **MNIST 旋转预测**: 输入当前帧 (t)，预测旋转后的下一帧 (t+1)。支持固定角度或随机角度旋转。
-  - **Sekiro (只狼) 画面重建**: 输入只狼游戏的原始画面 `(3, 128, 240)`。使用 **卷积 VAE (ConvVAE)** 模型，通过局部感受野和权重共享机制，显著降低参数量，从而能够轻松处理全分辨率彩色图像。
-- **训练可视化**: 每个 epoch 自动保存重建对比图（Input / Target / Predict）和损失曲线。
-- **ELBO 损失**: 结合重建损失 (BCE/MSE) 和 KL 散度正则化。
+## Environment Setup
 
-## 项目结构
-
-```
-World-Studio/
-├── data/
-│   └── demos/                # 只狼轨迹数据 (.pt 文件)
-├── scripts/
-│   ├── mnist/
-│   │   ├── train_vae.py      # MNIST VAE 训练脚本
-│   │   ├── train_vqvae.py    # MNIST VQ-VAE 训练脚本
-│   │   ├── train_jepa.py     # MNIST JEPA 训练脚本
-│   │   └── train_rssm.py     # MNIST RSSM 训练脚本
-│   ├── sekiro/
-│   │   ├── train_vae.py      # 只狼 VAE 训练脚本
-│   │   ├── train_vqvae.py    # 只狼 VQ-VAE 训练脚本
-│   │   ├── train_jepa.py     # 只狼 JEPA 训练脚本
-│   │   └── train_rssm.py     # 只狼 RSSM 训练脚本
-│   └── tools/
-│       └── prof_model.py     # 模型分析
-├── src/
-│   ├── datasets/
-│   │   ├── mnist.py          # MNIST 数据集
-│   │   └── sekiro.py         # 只狼数据集
-│   ├── model/
-│   │   ├── backbone/         # 骨干网络组件
-│   │   │   ├── attention.py  # 注意力机制 (MHA/GQA/MLA)
-│   │   │   ├── moe.py        # 混合专家系统 (MoE)
-│   │   │   ├── rms.py        # RMS 归一化
-│   │   │   ├── rope.py       # 旋转位置编码
-│   │   │   ├── transform.py  # Transformer 块 (Standard/Advanced/DeepSeekV2/V3)
-│   │   │   └── vision.py     # 视觉投影层
-│   │   ├── components/       # 模型通用组件
-│   │   │   ├── attention.py  # 注意力机制
-│   │   │   ├── focus.py      # 空间专注层 (Focus/UnFocus)
-│   │   │   ├── loss.py       # 损失函数 (含感知损失)
-│   │   │   ├── norm.py       # 归一化层 (RMSNorm2d/LayerNorm2d)
-│   │   │   ├── resnet.py     # ResNet 残差块 (Basic/BottleNeck/ResBlock)
-│   │   │   └── cuda_norm/    # CUDA 归一化算子
-│   │   │       ├── norm_bind.cpp
-│   │   │       ├── norm_kernel.cu
-│   │   │       └── ops_norm.py
-│   │   ├── ecr/              # 高效演化层 (ECR)
-│   │   │   ├── ecr.py        # 核心逻辑 (CrossScholarFusion/EfficientCrossResBlock)
-│   │   │   ├── cuda_evolution/ # CUDA 演化算子实现
-│   │   │   │   ├── evolution_bind.cpp   # 接口绑定
-│   │   │   │   ├── evolution_kernel.cu # 演化内核 (极致优化)
-│   │   │   │   ├── ops_evolution.py    # Python 算子封装
-│   │   │   │   ├── utils_compile.py    # 编译验证工具
-│   │   │   │   └── utils_speed.py      # 性能测试工具
-│   │   │   └── utils/        # ECR 专项性能分析
-│   │   │       ├── prof_block.py   # 模块级性能诊断 (显存/耗时/算力)
-│   │   │       ├── prof_fusion.py  # 融合策略对比 (理论算力)
-│   │   │       ├── prof_layer.py   # 逐层性能分析 (显存/耗时)
-│   │   │       └── prof_flops.py   # 逐层算力分析 (FLOPs 统计)
-│   │   ├── gan/              # 判别器组件
-│   │   │   └── discriminator.py
-│   │   └── world/            # 世界模型实现 (基础架构)
-│   │       ├── jepa.py       # JEPA 模型基类
-│   │       ├── rssm.py       # RSSM 模型基类
-│   │       ├── vae.py        # VAE 模型基类
-│   │       └── vq_vae.py     # VQ-VAE 模型基类
-│   ├── world/                # 世界模型框架 (模块化通用架构)
-│   │   ├── vision/           # 视觉编码器
-│   │   │   ├── base.py       # 视觉基类
-│   │   │   ├── mnist.py      # MNIST 视觉模块
-│   │   │   └── sekiro.py     # 只狼视觉模块 (Conv/ResNet/Brain)
-│   │   ├── projection/       # 潜空间投影层
-│   │   │   └── projection.py # Linear/Attention/SpatialProjection
-│   │   ├── latents/          # 隐空间约束层
-│   │   │   ├── vae.py        # VAE 重参数化
-│   │   │   ├── vq.py         # VQ-VAE 矢量量化
-│   │   │   └── vicreg.py     # VICReg 正则化
-│   │   ├── dream/            # 世界模型框架
-│   │   │   ├── vae.py        # StaticReconstruction 框架
-│   │   │   ├── jepa.py       # JEPA 预测框架
-│   │   │   └── rssm.py       # RSSM 状态空间框架
-│   │   └── predictor/        # 预测器模块
-│   │       ├── predictor.py  # 时序/空间预测器
-│   │       └── __init__.py
-│   └── train/
-│       └── train_utils.py    # 训练工具 (日志目录生成)
-├── configs/
-│   ├── __init__.py
-│   ├── model.py              # 模型配置 (VVConfig/VisualVVConfig)
-│   └── world.py              # 世界模型配置
-├── outputs/
-│   ├── results/              # 训练结果：重建图、损失曲线
-│   └── models/               # 保存的模型权重 (.pth)
-├── logs/                     # TensorBoard 日志
-├── tests/                    # 测试文件
-├── .gitignore
-└── QWEN.md                   # 项目文档
+### Dependencies
+```bash
+pip install torch torchvision numpy matplotlib tensorboard
 ```
 
-## 环境要求
+No additional package management files exist; dependencies are minimal as listed above.
 
-- **Python**: 3.8+
-- **PyTorch**: 1.9+
-- **Torchvision**: 0.10+
-- **NumPy**
-- **Matplotlib**
-- **TensorBoard**
+### CUDA Operators
+Custom CUDA kernels for normalization (RMSNorm2d, LayerNorm2d) and evolution layers (ECR) are automatically compiled via PyTorch's JIT compilation when first imported. No separate build step is required.
 
-## 构建与运行
+### Datasets
+- **MNIST**: Automatically downloaded by `torchvision.datasets.MNIST` to `data/MNIST/raw/`.
+- **Sekiro**: Expected in `data/Sekiro/recordings/` as `.npy` files; see `src/datasets/sekiro.py` for details.
 
-### 启动训练
+## Common Commands
 
-```powershell
-# MNIST 任务
+### Training
+```bash
+# MNIST tasks
 python scripts/mnist/train_vae.py
 python scripts/mnist/train_vqvae.py
 python scripts/mnist/train_jepa.py
 python scripts/mnist/train_rssm.py
 
-# 只狼任务
+# Sekiro tasks (full‑resolution game frames)
 python scripts/sekiro/train_vae.py
 python scripts/sekiro/train_vqvae.py
 python scripts/sekiro/train_jepa.py
 python scripts/sekiro/train_rssm.py
 ```
 
-训练过程将自动：
-1. 根据脚本中的配置加载数据集。
-2. 每个 epoch 保存一次重建对比图到 `outputs/results/`。
-3. 训练结束后保存损失曲线和模型权重到 `outputs/models/`。
-4. 使用 TensorBoard 记录训练指标 (Sekiro 任务)。
+### Testing
+```bash
+# Install pytest if not already available
+pip install pytest
 
-### 配置说明
+# Run all unit tests
+python -m pytest tests/
 
-在训练脚本中可调整以下参数：
-
-```python
-# 模型架构选择
-model = FCVAE(latent_dim=20).to(device)        # 全连接 VAE
-model = ConvVAE(latent_dim=20).to(device)      # 卷积 VAE
-model = ResNetVAE(latent_dim=20).to(device)    # 残差 VAE
-
-# VAE 超参数
-beta = 1.0          # KL 散度权重 (β-VAE)
-latent_dim = 256    # 隐空间维度
-
-# RSSM 配置
-seq_len = 8         # 序列长度
-action_dim = 4      # 动作维度
+# Run a specific test file
+python tests/test_refactored_vae.py
 ```
 
-## 开发规范
+### Monitoring
+```bash
+# Start TensorBoard (logs are saved under logs/{task}/{model}/)
+tensorboard --logdir=logs/sekiro/vae
+```
 
-### 代码风格
+### Model Profiling
+```bash
+# Analyze model parameters, memory, and FLOPs
+python scripts/tools/prof_model.py
+```
 
-- **类型注解**: 推荐使用 Python 类型注解
-- **命名约定**:
-  - 类名：大驼峰 (PascalCase)，如 `BaseVAE`, `AttentiveRSSM`
-  - 函数/变量：小写 + 下划线 (snake_case)
-  - 常量：全大写 + 下划线
-- **文档字符串**: 类和公共方法应包含 docstring
+### CUDA Kernel Verification
+```bash
+# Test custom CUDA operators
+python src/model/ecr/cuda_evolution/utils_compile.py
+```
 
-### 模型设计规范
+## High‑Level Architecture
 
-1. **模块化**: 所有世界模型继承自基类 (`BaseVAE`, `BaseJEPA`, `BaseRSSM`, `BaseVQVAE`)
-2. **组件复用**: 使用 `backbone/` 和 `components/` 中的通用组件
-3. **配置分离**: 超参数通过 `configs/` 中的 dataclass 管理
-4. **算子优化**: 核心计算密集型任务 (如 ECR, Norm) 优先使用 CUDA 融合算子实现
+The framework follows a **modular pipeline**:
 
-### 测试实践
+1. **Vision** (`src/world/vision/`) – Task‑specific encoders/decoders (MNISTConv, MNISTResNet, SekiroConv, SekiroResNet)
+2. **Projection** (`src/world/projection/`) – Transforms feature maps to/from token space (LinearProjection, SpatialProjection)
+3. **Latent** (`src/world/latents/`) – Imposes constraints on the latent space (VAELatent, VQLatent, VICRegLatent)
+4. **Dream** (`src/world/dream/`) – High‑level world‑model wrappers (StaticReconstruction for VAE/VQ‑VAE, JEPAFramework, RSSMFramework)
+5. **Predictor** (`src/world/predictor/`) – Optional temporal/spatial refinement modules
 
-- 新模型应在 `tests/` 目录下添加单元测试
-- 测试前向传播、损失计算、梯度流动
+### Model Families
+| Architecture | Latent Space | Backbone Options | Use Case |
+|--------------|--------------|------------------|----------|
+| **VAE**      | Continuous (Gaussian) | FC / Conv / ResNet | Reconstruction, generation |
+| **VQ‑VAE**   | Discrete (codebook)   | FC / Conv / ResNet | Compression, planning |
+| **JEPA**     | Embedding             | FC / Conv / ResNet | Self‑supervised prediction |
+| **RSSM**     | State‑space (RNN)     | FC / Conv / ResNet | Sequential decision‑making |
 
-## 扩展方向
+### Advanced Components
+- **MLA (Multi‑Head Latent Attention)** + **MoE (Mixture of Experts)** – Inspired by DeepSeek, configurable via `WorldConfig` dataclass.
+- **CUDA‑fused operators** – `ECR` (Efficient Cross‑Residual) and `Norm2D` (RMSNorm2d / LayerNorm2d) kernels for visual tensors.
 
-1. **调整隐空间**: 在训练脚本中修改 `latent_dim` 以观察压缩效果。
-2. **多帧预测**: 扩展 `SekiroDataset` 以支持输入 $t$ 预测 $t+1$。
-3. **β-VAE**: 调整 `beta` 参数控制 KL 散度的权重。
-4. **注意力机制**: 集成 `backbone/attention.py` 增强特征提取能力。
-5. **残差结构**: 使用 `backbone/resnet.py` 构建更深的网络。
-6. **新模型架构**: 参考 `scripts/mnist/` 下的脚本模板，实现新的世界模型变体。
-7. **MoE 集成**: 使用 `backbone/moe.py` 中的混合专家系统扩展模型容量。
-8. **DeepSeek 架构**: 集成 `DeepSeekV2Block`/`DeepSeekV3Block` 实现 MLA + MoE 架构。
+## Project Structure Highlights
 
-## 常见问题
+```
+World‑Studio/
+├── scripts/                     # Training scripts per task (mnist/, sekiro/)
+├── src/
+│   ├── model/                  # Core model components
+│   │   ├── backbone/           # Attention, MoE, Transformer blocks
+│   │   ├── components/         # Reusable layers (norm, resnet, loss)
+│   │   ├── ecr/                # CUDA evolution operators
+│   │   └── world/              # Base model classes (BaseVAE, BaseJEPA, …)
+│   └── world/                  # Modular world‑model framework
+│       ├── vision/             # Task‑specific encoders/decoders
+│       ├── projection/         # Feature‑token projections
+│       ├── latents/            # VAE/VQ/VICReg constraints
+│       ├── dream/              # High‑level wrappers
+│       └── predictor/          # Prediction modules
+├── configs/                    # Configuration dataclasses (WorldConfig)
+├── outputs/                    # Results (reconstruction images) and saved models
+├── logs/                       # TensorBoard logs
+└── tests/                      # Unit tests
+```
 
-### Windows 多进程数据加载
+## Configuration
 
-在 Windows 系统上，`DataLoader` 的 `num_workers` 应设置为 `0` 以避免内存占用飙升：
+Hyperparameters are managed via dataclasses in `configs/world.py`. The main `WorldConfig` defines dimensions, attention heads, MLA/MoE settings, and sequence length. Subclasses `VisionThinkingConfig` and `PredictorConfig` tailor the architecture for spatial understanding and temporal prediction respectively.
 
+Example configuration snippet:
+```python
+from configs.world import WorldConfig
+cfg = WorldConfig(
+    hidden_dim=576,
+    n_layer=8,
+    n_head=8,
+    kv_lora_rank=32,
+    num_experts=8,
+    num_experts_per_tok=2,
+)
+```
+
+## Development Notes
+
+### Windows Multiprocessing
+On Windows, set `num_workers=0` in `DataLoader` to avoid memory spikes:
 ```python
 train_loader = DataLoader(dataset, batch_size=16, shuffle=True, num_workers=0)
 ```
 
-### 显存优化
-
-- 使用 `PerceptualLoss` (基于 SqueezeNet) 替代 VGG 感知损失
-- 调整 `batch_size` 和 `latent_dim` 平衡显存占用
-- 使用梯度累积模拟大批次训练
-
-### 清理项目缓存 (Windows)
-
-若遇到模块导入异常或需要彻底清理 Python 编译缓存，可在 PowerShell 中运行：
-
-```powershell
-Get-ChildItem -Path . -Filter "__pycache__" -Recurse | Remove-Item -Force -Recurse
+### Module Import Paths
+Training scripts add the project root to `sys.path` to resolve imports. When writing new scripts, follow the pattern:
+```python
+import os, sys
+path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(path)
 ```
 
-## 输出说明
+### CUDA Kernel Development
+Custom CUDA operators are located in:
+- `src/model/ecr/cuda_evolution/` – Evolution and cross‑fusion kernels
+- `src/model/components/cuda_norm/` – Normalization kernels
 
-训练完成后，可在以下目录找到结果：
+Use `utils_compile.py` to verify correctness against PyTorch reference implementations.
 
-- `outputs/results/{task}/{model}/epoch_{n}.png` - 重建对比图
-- `outputs/models/{task}_{model}.pth` - 模型权重
-- `logs/{task}/{model}/{timestamp}/` - TensorBoard 日志
+### Adding a New Model
+1. Inherit from the appropriate base class in `src/model/world/` (e.g., `BaseVAE`).
+2. Implement `encode()` / `decode()` / `forward()`.
+3. Assemble components using the modular framework in `src/world/dream/`.
+4. Add a training script in `scripts/{task}/`.
+5. Write unit tests in `tests/`.
 
-查看 TensorBoard:
-```bash
-tensorboard --logdir=logs/sekiro/vae
-```
+### Output Directories
+- `outputs/results/{task}/{model}/epoch_{n}.png` – Reconstruction comparison images
+- `outputs/models/{task}_{model}.pth` – Saved model weights
+- `logs/{task}/{model}/{timestamp}/` – TensorBoard logs
+
+## Further Reading
+- `README.md` – Project overview, installation, and extended examples.
+- `QWEN.md` – Additional technical documentation (if present).

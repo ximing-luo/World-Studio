@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import torch
+import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -15,10 +16,13 @@ sys.path.append(path)
 sys.path.append(os.path.join(path, 'src'))
 
 from src.datasets.sekiro import Sekiro_VQVAE_Dataset
-from src.model.sekiro.vq_vae import ConvSekiroVQVAE, ResNetSekiroVQVAE
-from src.model.components.loss import PerceptualLoss
-from src.model.components.discriminator import PatchGANDiscriminator, GANLoss
-from src.train.train_utils import get_log_dir
+from src.world.vision.sekiro import SekiroConv, SekiroResNet
+from src.world.projection.projection import SpatialProjection
+from src.world.latents.vq import VQLatent
+from src.world.dream.vae import StaticReconstruction
+from src.utils.loss import PerceptualLoss
+from src.model.gan.discriminator import PatchGANDiscriminator, GANLoss
+from src.utils.train_utils import get_log_dir
 
 def train(epoch, model, discriminator, train_loader, optimizer_G, optimizer_D, perceptual_loss_fn, gan_loss_fn, device, embedding_dim=64, writer=None):
     model.train()
@@ -212,23 +216,15 @@ def main():
     # 在实际项目中应严格划分，这里为了演示方便复用 dataset
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    
-    # 模型初始化 - 支持 Conv, ResNet 架构
-    # model = ResNetSekiroVQVAE(in_channels=3, num_hiddens=num_hiddens, num_embeddings=num_embeddings, embedding_dim=embedding_dim).to(device)
-    # model = ConvSekiroVQVAE(in_channels=3, num_hiddens=num_hiddens, num_embeddings=num_embeddings, embedding_dim=embedding_dim).to(device)
-    
-    from world.vision.sekiro import SekiroConv
-    from world.projection.projection import SpatialProjection
-    from world.latents.vq import VQLatent
-    from world.dream.vae import StaticReconstruction
-
-    vision = SekiroConv()
-    # SekiroConv 输出通道 512，H=4, W=7 (128x240 -> 4x7)
+  
+    vision = SekiroResNet()
+    # SekiroResNet 输出通道 512，H=4, W=8 (128x240 -> 4x8)
     # 投影到 embedding_dim 通道的空间潜空间
-    proj = SpatialProjection(512, embedding_dim, 4, 7, is_vae=False)
+    proj = SpatialProjection(512, embedding_dim, 4, 8, is_vae=False)
     latent = VQLatent(num_embeddings, embedding_dim)
+    predictor = nn.Identity()
     
-    model = StaticReconstruction(vision, proj, latent).to(device)
+    model = StaticReconstruction(vision, proj, latent, predictor).to(device)
     
     # 判别器与损失函数初始化
     discriminator = PatchGANDiscriminator(input_nc=3).to(device)

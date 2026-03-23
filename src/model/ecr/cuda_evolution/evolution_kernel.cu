@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
 
 // -----------------------------------------------------------------------------
 // Evolution Kernel (Extreme Optimized Version with float4 Vectorization)
@@ -56,8 +57,8 @@ __global__ void evolution_kernel(
         } else {
             const int row_base = (b_c * H + cur_h) * W;
             
-            // Optimization: Vectorized Load for middle 4 pixels (if aligned and within bounds)
-            if (tx4 + 3 < W) {
+            // Optimization: Vectorized Load for middle 4 pixels (ONLY if W is multiple of 4 and aligned)
+            if (tx4 + 3 < W && (W % 4 == 0)) {
                 // Load tx4 to tx4+3 using float4
                 float4 val4 = reinterpret_cast<const float4*>(&x[row_base + tx4])[0];
                 
@@ -110,7 +111,7 @@ __global__ void evolution_kernel(
 
     // Output and Residual connection
     const int out_row_base = (b_c * H + ty) * W;
-    if (tx4 + 3 < W) {
+    if (tx4 + 3 < W && (W % 4 == 0)) {
         // Vectorized load for Residual (x)
         float4 residual4 = reinterpret_cast<const float4*>(&x[out_row_base + tx4])[0];
         
@@ -175,7 +176,7 @@ __global__ void evolution_backward_input_kernel(
             for (int j = 0; j < 6; ++j) gy_data[i][j] = 0.0f;
         } else {
             const int row_base = (b_c * H + cur_h) * W;
-            if (tx4 + 3 < W) {
+            if (tx4 + 3 < W && (W % 4 == 0)) {
                 float4 gy4 = reinterpret_cast<const float4*>(&grad_y[row_base + tx4])[0];
                 float left_gy = (tx4 > 0) ? grad_y[row_base + tx4 - 1] : 0.0f;
                 float right_gy = (tx4 + 4 < W) ? grad_y[row_base + tx4 + 4] : 0.0f;
@@ -210,7 +211,7 @@ __global__ void evolution_backward_input_kernel(
 
     // Final grad_x = grad_y + g_relu_x * (x > 0)
     const int out_row_base = (b_c * H + ty) * W;
-    if (tx4 + 3 < W) {
+    if (tx4 + 3 < W && (W % 4 == 0)) {
         // Optimization: Reuse grad_y from registers (gy_data[1][1..4]) instead of re-loading
         float4 gy4;
         gy4.x = gy_data[1][1];
@@ -259,7 +260,7 @@ __global__ void evolution_backward_param_kernel(
         
         // 1. Load 4 grad_y values
         float gy[4] = {0.0f};
-        if (tx4 + 3 < W) {
+        if (tx4 + 3 < W && (W % 4 == 0)) {
             float4 gy4 = reinterpret_cast<const float4*>(&grad_y[row_base + ty * W + tx4])[0];
             gy[0] = gy4.x; gy[1] = gy4.y; gy[2] = gy4.z; gy[3] = gy4.w;
         } else {
@@ -278,7 +279,7 @@ __global__ void evolution_backward_param_kernel(
                 for (int j = 0; j < 6; ++j) x_window[i][j] = 0.0f;
             } else {
                 const int x_row_base = row_base + cur_h * W;
-                if (tx4 + 3 < W) {
+                if (tx4 + 3 < W && (W % 4 == 0)) {
                     float4 x4 = reinterpret_cast<const float4*>(&x[x_row_base + tx4])[0];
                     float left_x = (tx4 > 0) ? x[x_row_base + tx4 - 1] : 0.0f;
                     float right_x = (tx4 + 4 < W) ? x[x_row_base + tx4 + 4] : 0.0f;
@@ -342,7 +343,10 @@ at::Tensor evolution_cuda_forward(
         (W + (threads.x * 4) - 1) / (threads.x * 4)
     );
 
-    evolution_kernel<<<blocks, threads>>>(
+    // Use current stream from PyTorch
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    
+    evolution_kernel<<<blocks, threads, 0, stream>>>(
         input.data_ptr<float>(), weights.data_ptr<float>(), 
         biases.data_ptr<float>(), output.data_ptr<float>(),
         B, C, H, W);
@@ -369,8 +373,11 @@ std::vector<at::Tensor> evolution_cuda_backward(
         (W + (threads.x * 4) - 1) / (threads.x * 4)
     );
 
+    // Use current stream from PyTorch
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    
     // 1. Compute grad_x
-    evolution_backward_input_kernel<<<blocks, threads>>>(
+    evolution_backward_input_kernel<<<blocks, threads, 0, stream>>>(
         grad_y.data_ptr<float>(), x.data_ptr<float>(),
         weights.data_ptr<float>(), grad_x.data_ptr<float>(),
         B, C, H, W);
@@ -383,7 +390,7 @@ std::vector<at::Tensor> evolution_cuda_backward(
         (H + threads_p.y - 1) / threads_p.y,
         (W + (threads_p.x * 4) - 1) / (threads_p.x * 4)
     );
-    evolution_backward_param_kernel<<<blocks_p, threads_p>>>(
+    evolution_backward_param_kernel<<<blocks_p, threads_p, 0, stream>>>(
         grad_y.data_ptr<float>(), x.data_ptr<float>(),
         grad_weights.data_ptr<float>(), grad_biases.data_ptr<float>(),
         B, C, H, W);

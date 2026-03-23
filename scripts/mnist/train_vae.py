@@ -13,7 +13,7 @@ path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.append(path)
 
 from src.datasets.mnist import MNIST_VAE_Dataset
-from src.world.vision.mnist import MNISTResNet
+from src.world.vision.mnist import MNISTConv, MNISTResNet
 from src.world.projection.projection import LinearProjection
 from src.world.latents.vae import VAELatent
 from src.world.dream.vae import StaticReconstruction
@@ -109,8 +109,8 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
     
     # 框架化构建模型
-    latent_dim = 20
-    vision = MNISTResNet(in_channels=1)
+    latent_dim = 25
+    vision = MNISTConv(in_channels=1)
     projection = LinearProjection(in_channels=128, height=7, width=7, token_dim=latent_dim, is_vae=True)
     latent = VAELatent()
     predictor = nn.Identity() # 基础 VAE 无需额外预测器

@@ -46,7 +46,23 @@ class TemporalPredictive(nn.Module):
             z_target = z_target.reshape(batch_size, seq_len_t * num_tokens, -1)
             
         # 3. 隐空间预测
-        z_pred = self.predictor(z_context)
+        if condition_seq is not None:
+            # 如果提供了条件，将其拼接到 tokens 维度
+            # z_context: (B, T_c * num_tokens, D)
+            # condition_seq: (B, T_t, D_cond) -> 需要对齐到 tokens
+            B, L, D = z_context.shape
+            if condition_seq.dim() == 2: # (B, D_cond)
+                cond = condition_seq.unsqueeze(1).expand(-1, L, -1)
+            elif condition_seq.dim() == 3: # (B, T, D_cond)
+                # 简单处理：将条件扩展到每个 token
+                cond = condition_seq.repeat_interleave(num_tokens, dim=1)
+            else:
+                cond = condition_seq
+            
+            z_input = torch.cat([z_context, cond], dim=-1)
+            z_pred = self.predictor(z_input)
+        else:
+            z_pred = self.predictor(z_context)
         
         # 4. 计算预测损失 (在隐空间)
         # 这里可以使用 VicReg 风格的损失或简单的 MSE

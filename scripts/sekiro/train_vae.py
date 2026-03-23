@@ -13,11 +13,14 @@ sys.path.append(path)
 sys.path.append(os.path.join(path, 'src'))
 
 from src.datasets.sekiro import Sekiro_VAE_Dataset
-from src.model.sekiro.vae import ConvSekiroVAE, ResNetSekiroVAE
-from src.model.components.loss import loss_function
-from src.train.train_utils import get_log_dir
+from src.world.vision.sekiro import SekiroConv
+from src.world.projection.projection import SpatialProjection
+from src.world.latents.vae import VAELatent
+from src.world.dream.vae import StaticReconstruction
+from src.utils.loss import loss_function
+from src.utils.train_utils import get_log_dir
 
-def train(epoch, model, train_loader, optimizer, device, beta=1.0, latent_dim=256, writer=None):
+def train(epoch, model, train_loader, optimizer, device, beta=1.0, writer=None):
     model.train()
     train_loss = 0
     start_time = time.time()
@@ -44,23 +47,17 @@ def train(epoch, model, train_loader, optimizer, device, beta=1.0, latent_dim=25
         optimizer.step()
         
         if batch_idx % 10 == 0:
-            # 计算用于评估的平均值（不改变损失纲量）
-            # 1. Pixel MSE: 平均每个像素的误差 (recon_loss 是 sum 模式，除以 B*C*H*W)
-            pixel_mse = recon_loss.item() / (B * C * H * W)
-            # 2. KL per Dim: 平均每个隐维度的 KL (KLD 是 sum 模式，除以 B*latent_dim)
-            kl_per_dim = KLD.item() / (B * latent_dim)
-            
             elapsed = time.time() - start_time
             print(f'[{elapsed:.2f}s] Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
-                  f'Loss: {loss.item() / B:.4f} (Pixel MSE: {pixel_mse:.6f}, KL/Dim: {kl_per_dim:.6f})')
+                  f'Loss: {loss.item() / B:.4f}')
             
             if writer is not None:
                 step = (epoch - 1) * len(train_loader) + batch_idx
                 # Log per-sample loss
-                writer.add_scalar('train/loss', loss.item() / len(data), step)
-                writer.add_scalar('train/recon_loss', recon_loss.item() / len(data), step)
-                writer.add_scalar('train/kld_loss', KLD.item() / len(data), step)
+                writer.add_scalar('train/loss', loss.item() / B, step)
+                writer.add_scalar('train/recon_loss', recon_loss.item() / B, step)
+                writer.add_scalar('train/kld_loss', KLD.item() / B, step)
     
     avg_loss = train_loss / len(train_loader.dataset)
     print(f'====> Epoch: {epoch} Average loss: {avg_loss:.4f}')
@@ -149,7 +146,6 @@ def main():
     batch_size = 16
     learning_rate = 5e-4
     epochs = 10
-    latent_dim = 512
     beta = 1.0
     # Prediction offset (frame_skip in dataset)
     prediction_offset = 1 
@@ -172,22 +168,19 @@ def main():
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     
-    from world.vision.sekiro import SekiroConv
-    from world.projection.projection import SpatialProjection
-    from world.latents.vae import VAELatent
-    from world.dream.vae import StaticReconstruction
-
+    # 框架化构建模型
     vision = SekiroConv()
     # SekiroConv 输出通道 512，H=4, W=7 (128x240 -> 4x7)
     # 投影到 16 通道的空间潜空间，并设为随机投影 (is_vae=True)
     proj = SpatialProjection(512, 16, 4, 7, is_vae=True)
     latent = VAELatent()
+    predictor = torch.nn.Identity()
     
-    model = StaticReconstruction(vision, proj, latent).to(device)
+    model = StaticReconstruction(vision, proj, latent, predictor).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     for epoch in range(1, epochs + 1):
-        train(epoch, model, train_loader, optimizer, device, beta, latent_dim, writer)
+        train(epoch, model, train_loader, optimizer, device, beta, writer)
         eval_task(model, test_loader, device, beta, writer, epoch)
         visualize(model, train_loader, device, epoch, writer)
 

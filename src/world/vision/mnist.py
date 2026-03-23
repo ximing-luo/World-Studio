@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from src.model.components.resnet import BasicBlock, TraditionalBasicBlock, BottleNeck
+from src.model.ecr import EcrBlock
 
 from .base import BaseVision
 
@@ -38,17 +39,17 @@ class MNISTConv(BaseVision):
         
         # 编码器 (Encoder)
         self.encoder_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 4, stride=2, padding=1), # 14x14
+            nn.Conv2d(in_channels, 64, 4, stride=2, padding=1), # 14x14
             nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2, padding=1), # 7x7
+            nn.Conv2d(64, 128, 4, stride=2, padding=1), # 7x7
             nn.ReLU(),
         )
             
         # 解码器 (Decoder)
         self.decoder_conv = nn.Sequential(
-            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1), # 14x14
+            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1), # 14x14
             nn.ReLU(),
-            nn.ConvTranspose2d(32, in_channels, 4, stride=2, padding=1), # 28x28
+            nn.ConvTranspose2d(64, in_channels, 4, stride=2, padding=1), # 28x28
             nn.Sigmoid()
         )
 
@@ -60,10 +61,8 @@ class MNISTConv(BaseVision):
 
 class MNISTResNet(BaseVision):
     """残差 (ResNet) MNIST 视觉模块：仅负责特征提取与重构。"""
-    def __init__(self, in_channels=1, block=BottleNeck, num_blocks=[2, 2], **block_kwargs):
+    def __init__(self, in_channels=1, block=EcrBlock, num_blocks=[6, 6]):
         super().__init__()
-        # 获取残差块的输出膨胀系数，默认为 1
-        expansion = getattr(block, 'expansion', 1)
         self.in_channels = 64
         
         # 编码器 (Encoder)
@@ -72,33 +71,32 @@ class MNISTResNet(BaseVision):
             nn.GroupNorm(8, 64),
             nn.SiLU(inplace=True)
         )
-        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=2, **block_kwargs)  # 14x14
-        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2, **block_kwargs) # 7x7
+        self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=2)  # 14x14
+        self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2) # 7x7
             
         # 解码器 (Decoder)
-        self.in_channels = 128 * expansion
-        self.layer3 = self._make_layer(block, 128, num_blocks[1], stride=1, **block_kwargs)
-        self.upsample1 = nn.ConvTranspose2d(128 * expansion, 64 * expansion, kernel_size=3, stride=2, padding=1, output_padding=1) # 14x14
+        self.layer3 = self._make_layer(block, 128, num_blocks[1], stride=1)
+        self.upsample1 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1) # 14x14
+        self.in_channels = 64
         
-        self.in_channels = 64 * expansion
-        self.layer4 = self._make_layer(block, 64, num_blocks[0], stride=1, **block_kwargs)
-        self.upsample2 = nn.ConvTranspose2d(64 * expansion, 32, kernel_size=3, stride=2, padding=1, output_padding=1) # 28x28
+        self.layer4 = self._make_layer(block, 64, num_blocks[0], stride=1)
+        self.upsample2 = nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1) # 28x28
         
         self.final_conv = nn.Sequential(
             nn.Conv2d(32, in_channels, kernel_size=3, padding=1),
             nn.Sigmoid()
         )
 
-    def _make_layer(self, block, out_channels, num_block, stride, **kwargs):
-        strides = [stride] + [1] * (num_block - 1)
+    def _make_layer(self, block, dim, num_blocks, stride=1):
         layers = []
-        # 获取 expansion 类属性，默认为 1 (表示输出通道数与 out_channels 一致)
-        expansion = getattr(block, 'expansion', 1)
-        for s in strides:
-            layers.append(block(self.in_channels, out_channels, stride=s, **kwargs))
-            self.in_channels = out_channels * expansion
+        # 只有第一个块可能负责处理 stride (和可能的维度切换)
+        layers.append(block(self.in_channels, dim, stride=stride))
+        self.in_channels = dim # 这里的 dim 是该 Stage 预设的主干宽度
+        
+        # 后续所有块全是 dim -> dim
+        for _ in range(1, num_blocks):
+            layers.append(block(dim, dim, stride=1))
         return nn.Sequential(*layers)
-
 
     def encode(self, x):
         h = self.stem(x)

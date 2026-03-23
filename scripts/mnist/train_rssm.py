@@ -12,12 +12,15 @@ import numpy as np
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.model.mnist.rssm import FCRSSM, ConvRSSM, ResNetRSSM
+from src.world.vision.mnist import MNISTConv, MNISTResNet
+from src.world.projection.projection import LinearProjection
+from src.world.latents.vae import VAELatent
+from src.world.predictor.predictor import TransformerPredictor
+from src.world.dream.rssm import TemporalGenerative
 from src.datasets.mnist import MNIST_RSSM_Dataset
 
 def kl_divergence(mu1, logvar1, mu2, logvar2):
     """计算两个高斯分布之间的 KL 散度: KL(N(mu1, sigma1) || N(mu2, sigma2))"""
-    # logvar = 2 * log(sigma) -> sigma^2 = exp(logvar)
     var1 = torch.exp(logvar1)
     var2 = torch.exp(logvar2)
     kl = 0.5 * (logvar2 - logvar1 + (var1 + (mu1 - mu2)**2) / var2 - 1.0)
@@ -31,17 +34,22 @@ def train():
     mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transforms.ToTensor())
     # 序列长度为 8，每步旋转 15 度
     train_dataset = MNIST_RSSM_Dataset(mnist_train, seq_len=8, angle=15)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
 
-    # 模型初始化 - 支持 FC, Conv, ResNet 三种架构
-    # model = FCRSSM(action_dim=1).to(device)
-    # model = ResNetRSSM(action_dim=1).to(device)
-    model = ConvRSSM(action_dim=1).to(device)
+    # 框架化构建模型
+    latent_dim = 32
+    vision = MNISTConv(in_channels=1)
+    projection = LinearProjection(in_channels=128, height=7, width=7, token_dim=latent_dim, is_vae=True)
+    latent = VAELatent()
+    # 预测器：输入潜变量，输出预测潜变量参数 (mu, logvar)
+    # 这里的输入维度是 latent_dim，输出维度是 latent_dim * 2 (用于 mu/logvar)
+    predictor = TransformerPredictor(input_dim=latent_dim, output_dim=latent_dim * 2, hidden_dim=128, num_layers=4)
     
+    model = TemporalGenerative(vision, projection, latent, predictor).to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
     epochs = 10
-    beta = 1.0 # KL 权重
+    beta = 1.0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -50,69 +58,47 @@ def train():
         total_kl = 0
         
         for batch_idx, (seq, actions) in enumerate(train_loader):
-            # seq: [B, T, C, H, W] -> [T, B, C, H, W]
-            seq = seq.transpose(0, 1).to(device).float()
-            # actions: [B, T, 1] -> [T, B, 1]
-            actions = actions.transpose(0, 1).to(device).float()
-            
-            T, B, C, H, W = seq.size()
-            
-            # 初始状态
-            state = model.init_state(B, device)
-            
-            batch_recon_loss = 0
-            batch_kl_loss = 0
-            
-            # 遍历序列
-            for t in range(T):
-                obs = seq[t]
-                action = actions[t]
-                
-                # Action Logic:
-                # at step t, we observe obs[t].
-                # The transition to obs[t] was caused by action[t-1] (applied to obs[t-1]).
-                # For t=0, there is no previous action, so we use zero.
-                if t == 0:
-                    current_action = torch.zeros_like(action)
-                else:
-                    current_action = actions[t-1]
-                
-                # 1. 观察步 (Posterior)
-                post_state, (post_mu, post_logvar) = model.observe(obs, state, current_action)
-                
-                # 2. 想象步 (Prior) - 用于计算 KL 散度，让先验向后验靠拢
-                _, (prior_mu, prior_logvar) = model.imagine(state, current_action)
-                
-                # 3. 解码 (从后验状态还原为图像)
-                recon_obs = model.decode_state(post_state[0], post_state[1])
-                
-                # 计算损失
-                recon_loss = F.mse_loss(recon_obs, obs, reduction='sum') / B
-                kl_loss = kl_divergence(post_mu, post_logvar, prior_mu, prior_logvar)
-                
-                batch_recon_loss += recon_loss
-                batch_kl_loss += kl_loss
-                
-                # 更新状态为当前后验状态，用于下一步
-                state = post_state
-            
-            loss = batch_recon_loss + beta * batch_kl_loss
+            # seq: [B, T, C, H, W]
+            seq = seq.to(device).float()
+            # actions: [B, T, 1]
+            actions = actions.to(device).float()
             
             optimizer.zero_grad()
+            
+            # 使用框架的 observe 逻辑
+            # 返回: 先验参数 (B, T*S, 2D), 后验采样 z (B, T*S, D), 隐空间损失 (KL 与先验对齐)
+            prior_params, z_post, latent_loss = model.observe(seq)
+            
+            # 批量解码
+            # z_post: (B, T*S, D) -> 需要调整为 (B*T, S, D) 以便批量解码
+            B, T_S, D = z_post.shape
+            S = model.projection.num_tokens
+            T = T_S // S
+            
+            z_post_reshaped = z_post.view(B * T, S, D)
+            recon_seq = model.decode(z_post_reshaped) 
+            recon_seq = recon_seq.view(B, T, *seq.shape[2:])
+            
+            # 重建损失
+            recon_loss = F.mse_loss(recon_seq, seq, reduction='sum') / B
+            
+            # 总损失
+            loss = recon_loss + beta * latent_loss
+            
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
-            total_recon += batch_recon_loss.item()
-            total_kl += batch_kl_loss.item()
+            total_recon += recon_loss.item()
+            total_kl += latent_loss.item()
             
             if batch_idx % 100 == 0:
-                print(f"Epoch {epoch} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f} (Recon: {batch_recon_loss.item():.4f}, KL: {batch_kl_loss.item():.4f})")
+                print(f"Epoch {epoch} [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f} (Recon: {recon_loss.item():.4f}, KL: {latent_loss.item():.4f})")
         
         avg_loss = total_loss / len(train_loader)
         print(f"====> Epoch: {epoch} Average loss: {avg_loss:.4f}")
         
-        # 每个 epoch 结束后进行一次可视化
+        # 可视化
         visualize_dream(model, train_loader, device, epoch)
 
     # 保存模型
@@ -124,44 +110,41 @@ def visualize_dream(model, loader, device, epoch, num_samples=5):
     model.eval()
     with torch.no_grad():
         seq, actions = next(iter(loader))
-        seq = seq.transpose(0, 1).to(device).float()
-        actions = actions.transpose(0, 1).to(device).float()
+        seq = seq.to(device).float()
         
-        T, B, C, H, W = seq.size()
+        B, T, C, H, W = seq.size()
         B = min(B, num_samples)
+        seq = seq[:B]
         
-        # 只取前几个样本
-        seq = seq[:, :B]
-        actions = actions[:, :B]
-        
-        state = model.init_state(B, device)
-        
-        # 观察前 3 帧
+        # 1. 观察前 3 帧
         obs_len = 3
-        recon_frames = []
+        obs_seq = seq[:, :obs_len]
         
-        # 1. Observe Phase (Posterior)
+        # 获取前 3 帧的后验分布
+        _, z_post_obs, _ = model.observe(obs_seq) # (B, obs_len * S, D)
+        
+        # 2. 想象后续帧
+        # 从 z_post_obs 开始推演
+        current_z_seq = z_post_obs
+        all_recon = []
+        
+        # 解码已观察部分
+        recon_obs = model.decode(z_post_obs) # (B * obs_len, C, H, W)
+        recon_obs = recon_obs.view(B, obs_len, C, H, W)
         for t in range(obs_len):
-            obs = seq[t]
-            if t == 0:
-                current_action = torch.zeros_like(actions[t])
-            else:
-                current_action = actions[t-1]
-                
-            post_state, _ = model.observe(obs, state, current_action)
-            recon = model.decode_state(post_state[0], post_state[1])
-            recon_frames.append(recon.cpu())
-            state = post_state
+            all_recon.append(recon_obs[:, t])
             
-        # 2. Imagine Phase (Prior)
-        # To predict frame t, we use state_{t-1} and action_{t-1}
+        # 逐步推演
         for t in range(obs_len, T):
-            current_action = actions[t-1]
+            # 想象下一帧
+            z_next, _ = model.imagine_next(current_z_seq) # (B, S, D)
             
-            prior_state, _ = model.imagine(state, current_action)
-            recon = model.decode_state(prior_state[0], prior_state[1])
-            recon_frames.append(recon.cpu())
-            state = prior_state
+            # 解码下一帧
+            recon_next = model.decode(z_next) # (B, C, H, W)
+            all_recon.append(recon_next)
+            
+            # 更新历史潜变量序列
+            current_z_seq = torch.cat([current_z_seq, z_next], dim=1)
             
         # 绘图
         fig, axes = plt.subplots(B, T, figsize=(T*2, B*2))
@@ -170,7 +153,7 @@ def visualize_dream(model, loader, device, epoch, num_samples=5):
         for i in range(B):
             for t in range(T):
                 ax = axes[i, t]
-                img = recon_frames[t][i].squeeze().numpy()
+                img = all_recon[t][i].cpu().squeeze().numpy()
                 ax.imshow(img, cmap='gray')
                 ax.axis('off')
                 if t < obs_len:

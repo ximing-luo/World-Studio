@@ -19,9 +19,9 @@ class CrossScholarFusion(nn.Module):
     def __init__(self, in_channels, out_channels, latent_dim=None):
         super().__init__()
         if latent_dim is None:
-            latent_dim = in_channels // 16
-        if latent_dim < 64:
-            latent_dim = 64
+            latent_dim = in_channels // 8
+        if latent_dim < 32:
+            latent_dim = 32
         self.latent_dim = latent_dim
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -56,12 +56,12 @@ class EfficientEvolutionLayer(nn.Module):
         super().__init__()
         self.conv = nn.Sequential(
             # 极致优化: 使用 ReLU 代替 LeakyReLU，保持 1-bit mask 级别的显存优势
-            nn.ReLU(inplace=False), # 必须为 False，否则会破坏残差连接的输入 x
-            nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2, groups=channels, bias=True)
+            nn.ReLU(inplace=True), # 必须为 False，否则会破坏残差连接的输入 x
+            nn.Conv2d(channels, channels, kernel_size, padding=kernel_size//2, groups=channels, bias=False)
         )
         
     def forward(self, x):
-        return x + self.conv(x)
+        return self.conv(x)
 
 class EfficientCrossResBlock(nn.Module):
     """
@@ -72,7 +72,6 @@ class EfficientCrossResBlock(nn.Module):
     - 空间特征提取: 通过极致的分组卷积 (EfficientEvolutionLayer) 进行“静默”演化，不进行通道间沟通。
     - 全局语义融合: 最后通过 CrossScholarFusion (基于低秩潜空间的交叉注意力机制) 实现高效的全局通道交互。
     - 架构演进: 将传统的 Dense 卷积残差结构转变为“稀疏演化 + 瓶颈融合”的高效范式。
-    - 显存优化: 支持梯度检查点 (Gradient Checkpointing)，在大规模深度演化时可大幅降低训练显存。
     """
     def __init__(self, in_channels, out_channels, expansion=0.5, stride=1, num_evolve_layers=4):
         super().__init__()
@@ -87,20 +86,19 @@ class EfficientCrossResBlock(nn.Module):
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, stride=stride, padding=1, groups=group, bias=False)
         )
         self.seblock = SEBlock(mid_channels, reduction=4)
-        self.evolution = nn.Sequential(*[EvolutionLayer(mid_channels) for _ in range(num_evolve_layers)])
+        self.evolution = nn.Sequential(*[EfficientEvolutionLayer(mid_channels) for _ in range(num_evolve_layers)])
         self.fusion = CrossScholarFusion(mid_channels, out_channels)
+        # self.fusion = nn.Conv2d(mid_channels, out_channels, kernel_size=1, padding=0, bias=False)
 
         self.shortcut = None
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
+                LayerNorm2d(in_channels),
                 nn.AvgPool2d(kernel_size=stride, stride=stride, ceil_mode=True) if stride > 1 else nn.Identity(),
                 CrossScholarFusion(in_channels, out_channels)
             )
-        self.norm = LayerNorm2d(in_channels) if stride != 1 else None
 
     def forward(self, x):
-        if self.norm is not None:
-            x = self.norm(x)
         identity = self.shortcut(x) if self.shortcut is not None else x
         
         # 1. 膨胀下采样 (建立高维特征空间)

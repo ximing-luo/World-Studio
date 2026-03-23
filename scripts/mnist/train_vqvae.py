@@ -12,7 +12,10 @@ import numpy as np
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.model.mnist.vq_vae import FCVQVAE, ConvVQVAE, ResNetVQVAE
+from src.world.vision.mnist import MNISTConv, MNISTResNet
+from src.world.projection.projection import LinearProjection
+from src.world.latents.vq import VQLatent
+from src.world.dream.vae import StaticReconstruction
 from src.datasets.mnist import MNIST_VQVAE_Dataset
 
 def train():
@@ -24,12 +27,17 @@ def train():
     # 使用标准 MNIST，VQ-VAE 主要任务是高质量重建/压缩
     mnist_train = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
     train_dataset = MNIST_VQVAE_Dataset(mnist_train)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
 
-    # 模型初始化 - 支持 FC, Conv, ResNet 三种架构
-    model = FCVQVAE(num_embeddings=512, embedding_dim=32).to(device)
-    # model = ResNetVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
-    # model = ConvVQVAE(in_channels=1, num_hiddens=64, num_embeddings=512, embedding_dim=32).to(device)
+    # 框架化构建模型
+    latent_dim = 32
+    num_embeddings = 512
+    vision = MNISTConv(in_channels=1)
+    projection = LinearProjection(in_channels=128, height=7, width=7, token_dim=latent_dim, is_vae=False)
+    latent = VQLatent(num_embeddings=num_embeddings, embedding_dim=latent_dim)
+    predictor = nn.Identity()
+    
+    model = StaticReconstruction(vision, projection, latent, predictor).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     
@@ -46,8 +54,8 @@ def train():
             
             optimizer.zero_grad()
             
-            # VQ-VAE forward 返回: reconstruction, vq_loss
-            recon_batch, vq_loss = model(data)
+            # 框架模型输出: 重建图像, VQ 损失, 原始 tokens
+            recon_batch, vq_loss, _ = model(data)
             
             # 重建损失
             recon_loss = F.mse_loss(recon_batch, data)
@@ -82,7 +90,7 @@ def visualize_reconstruction(model, loader, device, epoch, num_samples=8):
         data, _ = next(iter(loader))
         data = data[:num_samples].to(device)
         
-        recon, _ = model(data)
+        recon, _, _ = model(data)
         
         # 绘图: 上面是原图，下面是重建
         fig, axes = plt.subplots(2, num_samples, figsize=(num_samples*1.5, 3))

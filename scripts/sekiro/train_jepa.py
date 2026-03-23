@@ -13,9 +13,13 @@ from torch.utils.tensorboard import SummaryWriter
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from src.model.sekiro.jepa import ConvSekiroJEPA, ResNetSekiroJEPA
+from src.world.vision.sekiro import SekiroConv, SekiroResNet
+from src.world.projection.projection import SpatialProjection
+from src.world.latents.vicreg import VicRegLatent
+from src.world.predictor.predictor import SpatioTemporalPredictor
+from src.world.dream.jepa import TemporalPredictive
 from src.datasets.sekiro import Sekiro_JEPA_Dataset
-from src.train.train_utils import get_log_dir
+from src.utils.train_utils import get_log_dir
 
 def train(epoch, model, train_loader, optimizer, device, writer=None):
     model.train()
@@ -31,7 +35,10 @@ def train(epoch, model, train_loader, optimizer, device, writer=None):
         
         # --- JEPA 自监督训练 ---
         optimizer.zero_grad()
-        _, _, jepa_loss = model(img, next_img, action)
+        
+        # 适配框架序列输入: (B, 1, C, H, W)
+        _, _, jepa_loss = model(img.unsqueeze(1), next_img.unsqueeze(1), action)
+        
         jepa_loss.backward()
         optimizer.step()
         model.update_target(momentum=0.99)
@@ -94,14 +101,23 @@ def eval_task(model, loader, device, writer=None, epoch=None):
             next_img = next_img.to(device).float() / 255.0
             action = action.to(device)
             
-            z_context = model.context_encoder(img)
-            z_target = model.target_encoder(next_img)
+            feat_c = model.vision.encode(img)
+            z_context = model.projection.encode(feat_c) # (B, S, D)
+            
+            feat_t = model.target_vision.encode(next_img)
+            z_target = model.projection.encode(feat_t) # (B, S, D)
             
             # 预测特征
-            z_target_pred = model.predictor(torch.cat([z_context, action], dim=-1))
+            # 使用 TemporalPredictive 的条件注入逻辑
+            # 这里 z_context 是 (B, S, D), action 是 (B, D_cond)
+            # 按照 TemporalPredictive.forward 中的逻辑进行拼接
+            B, S, D = z_context.shape
+            cond = action.unsqueeze(1).expand(-1, S, -1)
+            z_input = torch.cat([z_context, cond], dim=-1)
+            z_target_pred = model.predictor(z_input)
             
             # 计算特征预测的 L2 距离
-            error = torch.norm(z_target_pred - z_target, dim=1).mean()
+            error = torch.norm(z_target_pred - z_target, dim=-1).mean()
             total_error += error.item()
             count += 1
                 
@@ -118,11 +134,12 @@ def main():
     learning_rate = 1e-4
     epochs = 10
     latent_dim = 256
+    action_dim = 13
     prediction_offset = 10 # 预测未来第几帧
     log_dir = get_log_dir('logs/sekiro/jepa')
     
     # DataLoader num_workers: Windows 下开启多进程会导致内存占用飙升
-    num_workers = 2 
+    num_workers = 0 
     
     # TensorBoard
     writer = SummaryWriter(log_dir)
@@ -135,9 +152,16 @@ def main():
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    # 模型初始化 - 支持 Conv, ResNet 架构
-    # model = ResNetSekiroJEPA(in_channels=3, latent_dim=latent_dim, action_dim=15).to(device)
-    model = ConvSekiroJEPA(in_channels=3, latent_dim=latent_dim, action_dim=15).to(device)
+    # 框架化构建模型
+    vision = SekiroConv()
+    # SekiroConv 输出通道 512，H=4, W=7 (128x240 -> 4x7)
+    projection = SpatialProjection(512, latent_dim, 4, 7, is_vae=False)
+    latent = VicRegLatent()
+    # 预测器：输入潜变量 + 动作编码
+    # 按照 TemporalPredictive 的逻辑，输入维度是 latent_dim + action_dim
+    predictor = SpatioTemporalPredictor(input_dim=latent_dim + action_dim, output_dim=latent_dim, hidden_dim=256, height=4, width=7)
+    
+    model = TemporalPredictive(vision, projection, latent, predictor).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     
     history = {

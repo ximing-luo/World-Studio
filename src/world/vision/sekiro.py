@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from src.model.components.resnet import BottleNeck
+from src.model.components.resnet import BasicBlock, BottleNeck
 from src.model.ecr.ecr import EfficientCrossResBlock
 from .base import BaseVision, ThinkingSpace
 
@@ -54,7 +54,7 @@ class SekiroConv(BaseVision):
 
 class SekiroResNet(BaseVision):
     """残差 (ResNet) Sekiro 视觉模块：仅负责特征提取与重构。"""
-    def __init__(self, in_channels=3, block=BottleNeck, num_blocks=[2, 2, 2, 2]):
+    def __init__(self, in_channels=3, block=BasicBlock, num_blocks=[2, 2, 2, 2]):
         super().__init__()
         self.in_channels = 32
         
@@ -70,21 +70,21 @@ class SekiroResNet(BaseVision):
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2) # 4x8
             
         # 解码器 (Decoder)
-        self.in_channels = 512 * block.expansion
+        self.in_channels = 512
         self.layer5 = self._make_layer(block, 512, num_blocks[3], stride=1)
-        self.upsample1 = nn.ConvTranspose2d(512 * block.expansion, 256 * block.expansion, kernel_size=3, stride=2, padding=1, output_padding=(1, 0)) # 8x15
+        self.upsample1 = nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=(1, 0)) # 8x15
         
-        self.in_channels = 256 * block.expansion
+        self.in_channels = 256
         self.layer6 = self._make_layer(block, 256, num_blocks[2], stride=1)
-        self.upsample2 = nn.ConvTranspose2d(256 * block.expansion, 128 * block.expansion, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 16x30
+        self.upsample2 = nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 16x30
         
-        self.in_channels = 128 * block.expansion
+        self.in_channels = 128
         self.layer7 = self._make_layer(block, 128, num_blocks[1], stride=1)
-        self.upsample3 = nn.ConvTranspose2d(128 * block.expansion, 64 * block.expansion, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 32x60
+        self.upsample3 = nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 32x60
         
-        self.in_channels = 64 * block.expansion
+        self.in_channels = 64
         self.layer8 = self._make_layer(block, 64, num_blocks[0], stride=1)
-        self.upsample4 = nn.ConvTranspose2d(64 * block.expansion, 32, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 64x120
+        self.upsample4 = nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 64x120
         
         self.upsample5 = nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=(1, 1)) # 128x240
         self.final_conv = nn.Sequential(
@@ -92,12 +92,15 @@ class SekiroResNet(BaseVision):
             nn.Sigmoid()
         )
 
-    def _make_layer(self, block, out_channels, num_block, stride):
-        strides = [stride] + [1] * (num_block - 1)
+    def _make_layer(self, block, dim, num_blocks, stride=1):
         layers = []
-        for s in strides:
-            layers.append(block(self.in_channels, out_channels, stride=s))
-            self.in_channels = out_channels * block.expansion
+        # 只有第一个块可能负责处理 stride (和可能的维度切换)
+        layers.append(block(self.in_channels, dim, stride=stride))
+        self.in_channels = dim # 这里的 dim 是该 Stage 预设的主干宽度
+        
+        # 后续所有块全是 dim -> dim
+        for _ in range(1, num_blocks):
+            layers.append(block(dim, dim, stride=1))
         return nn.Sequential(*layers)
 
     def encode(self, x):
