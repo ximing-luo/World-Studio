@@ -12,6 +12,9 @@
 
 World Model Studio 是一个专注于构建**世界模型 (World Model)** 的深度学习研究框架 —— 这类神经网络能够学习环境动态的内部表征并预测未来状态。项目灵感源自 VAE、VQ-VAE、JEPA 和 RSSM 等经典工作，为时空预测任务提供统一、模块化的架构设计。
 
+![MNIST VAE](doc/mnist_vae.png)
+![Sekiro RSSM](doc/sekiro_rssm.png)
+
 ### ✨ 核心特性
 
 - **多种架构**: VAE、VQ-VAE、JEPA、RSSM — 全部支持可互换的骨干网络
